@@ -47,6 +47,13 @@ export default function QuantitiesPage() {
   const [candidateBusy, setCandidateBusy] = useState<string | null>(null);
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const requestedSourceSet = params.get("sourceSet");
+    const requestedWorkPackage = params.get("workPackage");
+    const requestedResult = params.get("result");
+    if (requestedSourceSet && ["전체", "기준자료", "변경자료", "기준·변경 대조"].includes(requestedSourceSet)) setSourceSet(requestedSourceSet);
+    if (requestedWorkPackage) setWorkPackage(requestedWorkPackage);
+    if (requestedResult && ["전체", "일치", "불일치"].includes(requestedResult)) setResultCategory(requestedResult);
     // Load the full review window exposed by the API so 공사단위 filters do
     // not disappear just because the first page happens to be one workbook.
     fetchQuantityAnalysis(PROJECT_ID, "limit=5000")

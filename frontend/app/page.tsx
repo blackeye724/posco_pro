@@ -60,9 +60,9 @@ export default function Home() {
     {message && <PageMessage>{message}</PageMessage>}
     <section className="stats">{stats.map(stat => <Link className="stat-card" href={stat.href} key={stat.label}><span>{stat.label}</span><strong>{stat.value.toLocaleString()}</strong><small>검토 화면 열기 →</small></Link>)}</section>
     <section className="workflow-grid" aria-label="핵심 검토 흐름">
-      <Link className="workflow-card" href="/quantities"><span className="workflow-step">01 · 최초 자료</span><h3>내역서 ↔ 수량산출서</h3><p>사무동 기준자료의 내역 행을 기준으로 산출수량과 근거를 확인합니다.</p><small>{status ? `${status.warnings.toLocaleString()}건 검토 대기 · 시작 →` : "현황 확인 후 시작 →"}</small></Link>
+      <Link className="workflow-card" href="/quantities?sourceSet=기준자료"><span className="workflow-step">01 · 최초 자료</span><h3>내역서 ↔ 수량산출서</h3><p>사무동 기준자료의 내역 행을 기준으로 산출수량과 근거를 확인합니다.</p><small>{status ? `${status.warnings.toLocaleString()}건 검토 대기 · 시작 →` : "현황 확인 후 시작 →"}</small></Link>
       <Link className="workflow-card" href="/drawings"><span className="workflow-step">02 · 설계변경</span><h3>기준 ↔ 변경 자료</h3><p>내역서·수량산출서·도면을 비교하고 변경 및 신규 내역을 식별합니다.</p><small>{status ? `${status.drawing_candidates.toLocaleString()}건 변경 후보 · 열기 →` : "현황 확인 후 열기 →"}</small></Link>
-      <Link className="workflow-card" href="/prices"><span className="workflow-step">03 · 신규내역</span><h3>신규내역 단가 검토</h3><p>변경 검토에서 생성된 신규내역만 단가 후보와 근거를 확인합니다.</p><small>{status ? `${status.price_candidates.toLocaleString()}건 단가 후보 · 열기 →` : "현황 확인 후 열기 →"}</small></Link>
+      <Link className="workflow-card" href="/prices?sourceSet=변경자료"><span className="workflow-step">03 · 신규내역</span><h3>신규내역 단가 검토</h3><p>변경 검토에서 생성된 신규내역만 단가 후보와 근거를 확인합니다.</p><small>{status ? `${status.price_candidates.toLocaleString()}건 단가 후보 · 열기 →` : "현황 확인 후 열기 →"}</small></Link>
     </section>
     <section className="dashboard-insights">
       <div className="panel insight-panel">
