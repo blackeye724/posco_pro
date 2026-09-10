@@ -50,6 +50,9 @@ export default function ReviewQueuePage() {
   return <AppShell eyebrow="INTEGRATED REVIEW QUEUE" title="통합 검토 큐">
     <div className="review-scope-bar"><span>프로젝트 <strong>광양5 사무동</strong></span><span>건물 <strong>전체</strong></span><span>공종 <strong>전체</strong></span><span>자료 회차 <code>API 기준</code></span><span className="scope-state">승인 전 후보값</span></div>
     <p className="lead">검토 대상과 원본 근거를 한 화면에서 확인합니다. 수량·금액·단가는 승인 전 확정값으로 표시하지 않습니다.</p>
+    <nav className="review-stage-tabs" aria-label="검토 단계">
+      <a href="/review" className="active">전체 대기</a><a href="/quantities">01 최초 자료 검토</a><a href="/drawings">02 설계변경 검토</a><a href="/prices">03 신규내역 단가</a>
+    </nav>
     {notice && <PageMessage tone="danger">{notice}</PageMessage>}
     <section className="review-kpis">
       <div><span>검토 대기 항목</span><strong>{loading ? "—" : pendingCount.toLocaleString()}</strong><small>산식·도면·단가 복합 대상</small></div>

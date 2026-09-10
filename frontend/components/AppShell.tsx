@@ -5,19 +5,13 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { currentUserId, PROJECT_ID, USER_ID } from "./api";
 
-type NavIconName = "dashboard" | "review" | "upload" | "drawings" | "quantities" | "prices" | "approvals" | "history" | "chat" | "login";
-
-const navigation: [string, string, NavIconName][] = [
-  ["/", "현황 대시보드", "dashboard"],
-  ["/review", "통합 검토 큐", "review"],
-  ["/upload", "자료 업로드", "upload"],
-  ["/drawings", "도면 변경부위", "drawings"],
-  ["/quantities", "수량·산식·내역", "quantities"],
-  ["/prices", "신규내역 단가", "prices"],
-  ["/approvals", "승인 대기열", "approvals"],
-  ["/history", "검토 이력", "history"],
-  ["/chat", "검토 챗봇", "chat"],
-  ["/login", "로그인", "login"],
+type NavIconName = "dashboard" | "review" | "upload" | "drawings" | "quantities" | "prices" | "approvals" | "history" | "chat";
+type NavItem = [string, string, NavIconName];
+const navigationGroups: { label: string; items: NavItem[] }[] = [
+  { label: "현황", items: [["/", "현황 대시보드", "dashboard"]] },
+  { label: "검토 진행", items: [["/review", "통합 검토 큐", "review"], ["/quantities", "최초 자료 검토", "quantities"], ["/drawings", "설계변경 검토", "drawings"], ["/prices", "신규내역 단가 검토", "prices"]] },
+  { label: "자료·승인", items: [["/upload", "자료 업로드·회차", "upload"], ["/approvals", "승인 대기열", "approvals"], ["/history", "검토 이력", "history"]] },
+  { label: "도움", items: [["/chat", "검토 챗봇", "chat"]] },
 ];
 
 function NavIcon({ name }: { name: NavIconName }) {
@@ -66,7 +60,7 @@ export function AppShell({ children, eyebrow, title }: { children: React.ReactNo
       <div className="brand"><span className="brand-mark">CR</span><div className="brand-copy"><strong>Cost Review</strong><small>공사비 적정성 검토</small></div><button type="button" className="sidebar-toggle" onClick={togglePinned} aria-label={pinned ? "메뉴 고정 해제" : "메뉴 펼쳐 고정"} aria-pressed={pinned} title={pinned ? "메뉴 고정 해제" : "메뉴 펼쳐 고정"}><span aria-hidden="true">{pinned ? "‹" : "›"}</span></button></div>
       <div className="project-context"><span>검토 대상 프로젝트</span><strong>광양5 사무동</strong><small>{PROJECT_ID}</small></div>
       <nav aria-label="검토 화면">
-        {navigation.map(([href, label, icon]) => <Link key={href} href={href} title={label} className={pathname === href ? "nav-link active" : "nav-link"}><span className="nav-icon"><NavIcon name={icon} /></span><span className="nav-label">{label}</span></Link>)}
+        {navigationGroups.map(group => <div className="nav-group" key={group.label}><span className="nav-group-label">{group.label}</span>{group.items.map(([href, label, icon]) => <Link key={href} href={href} title={label} className={pathname === href ? "nav-link active" : "nav-link"}><span className="nav-icon"><NavIcon name={icon} /></span><span className="nav-label">{label}</span></Link>)}</div>)}
       </nav>
       <div className="sidebar-note"><strong>자동 확정 금지</strong><p>수량·금액·단가는 담당 부서 승인 전까지 검토 후보로만 표시됩니다.</p></div>
     </aside>

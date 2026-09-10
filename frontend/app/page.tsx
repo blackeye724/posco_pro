@@ -59,6 +59,11 @@ export default function Home() {
     <div className="dashboard-intro"><div><p className="lead">광양5 사무동 · 원본 업로드 기반 자동 전처리·규칙 검토</p><p className="muted-line">{dashboard?.generated_from || "원본 전처리 작업 상태 확인 중"}</p></div><div className="decision-actions"><button onClick={handleRuleRun} disabled={running}>{running ? "규칙 실행 중…" : "검토 규칙 실행"}</button><button className="button-secondary" onClick={handleExport} disabled={exporting}>{exporting ? "패키지 생성 중…" : "검토 결과 패키지 생성"}</button></div></div>
     {message && <PageMessage>{message}</PageMessage>}
     <section className="stats">{stats.map(stat => <Link className="stat-card" href={stat.href} key={stat.label}><span>{stat.label}</span><strong>{stat.value.toLocaleString()}</strong><small>검토 화면 열기 →</small></Link>)}</section>
+    <section className="workflow-grid" aria-label="핵심 검토 흐름">
+      <Link className="workflow-card" href="/quantities"><span className="workflow-step">01 · 최초 자료</span><h3>내역서 ↔ 수량산출서</h3><p>사무동 기준자료의 내역 행을 기준으로 산출수량과 근거를 확인합니다.</p><small>최초 자료 검토 시작 →</small></Link>
+      <Link className="workflow-card" href="/drawings"><span className="workflow-step">02 · 설계변경</span><h3>기준 ↔ 변경 자료</h3><p>내역서·수량산출서·도면을 비교하고 변경 및 신규 내역을 식별합니다.</p><small>설계변경 검토 열기 →</small></Link>
+      <Link className="workflow-card" href="/prices"><span className="workflow-step">03 · 신규내역</span><h3>신규내역 단가 검토</h3><p>변경 검토에서 생성된 신규내역만 단가 후보와 근거를 확인합니다.</p><small>단가 검토 열기 →</small></Link>
+    </section>
     <section className="dashboard-insights">
       <div className="panel insight-panel">
         <div className="panel-head"><div><p className="eyebrow">REVIEW SIGNALS</p><h2>검토 대기 분포</h2></div><span className="review-only">실제 API 집계</span></div>

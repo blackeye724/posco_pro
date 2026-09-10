@@ -226,3 +226,19 @@ h3 { font-size:1rem; line-height:1.35; }
 @media (max-width:1050px) { .upload-scope-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
 @media (max-width:700px) { .upload-scope-grid { grid-template-columns:1fr; }.upload-scope-grid label,.upload-form-panel form>label,.upload-form-panel form .form-two label { font-size:.75rem; }.upload-files-table { min-width:900px !important; } }
 .comparison-evidence-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin-top:12px; }.comparison-evidence-grid > div { display:grid; gap:6px; min-width:0; padding:12px; border:1px solid #d3dfe4; background:#f8fafc; border-radius:5px; }.comparison-evidence-grid strong { color:#102a43; font-size:.75rem; }.comparison-evidence-grid span { color:#536b78; font-size:.72rem; line-height:1.45; overflow-wrap:anywhere; }
+
+/* Workflow navigation and stage entry cards keep the product organized around the three review jobs. */
+.nav-group { display:grid; gap:3px; margin-top:9px; }
+.nav-group-label { padding:0 14px; color:#7fa1b6; font-size:.64rem; letter-spacing:.08em; text-transform:uppercase; }
+.workflow-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin:20px 0; }
+.workflow-card { display:grid; gap:8px; min-height:150px; padding:18px; border:1px solid #cfe0e5; border-radius:10px; background:linear-gradient(145deg,#fff,#f7fbfc); color:var(--ink); text-decoration:none; transition:transform .15s ease,border-color .15s ease,box-shadow .15s ease; }
+.workflow-card:hover { transform:translateY(-2px); border-color:#73c8bd; box-shadow:0 8px 20px rgba(16,42,67,.08); }
+.workflow-step { color:#0e766e; font:700 .7rem ui-monospace,SFMono-Regular,Consolas,monospace; letter-spacing:.08em; }
+.workflow-card h3 { margin:0; font-size:1.03rem; }
+.workflow-card p { margin:0; color:var(--muted); font-size:.76rem; line-height:1.45; }
+.workflow-card small { margin-top:auto; color:#0e766e; font-weight:650; }
+.review-stage-tabs { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 20px; padding:6px; border:1px solid #dce8ec; border-radius:8px; background:#f8fafc; }
+.review-stage-tabs a { padding:8px 13px; border-radius:5px; color:#536b78; font-size:.78rem; text-decoration:none; }
+.review-stage-tabs a:hover,.review-stage-tabs a.active { color:#fff; background:#0e766e; }
+@media (max-width:900px) { .workflow-grid { grid-template-columns:1fr; } }
+.sidebar:not(.is-pinned) .nav-group-label { display:none; }
