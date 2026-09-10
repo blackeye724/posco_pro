@@ -242,3 +242,4 @@ h3 { font-size:1rem; line-height:1.35; }
 .review-stage-tabs a:hover,.review-stage-tabs a.active { color:#fff; background:#0e766e; }
 @media (max-width:900px) { .workflow-grid { grid-template-columns:1fr; } }
 .sidebar:not(.is-pinned) .nav-group-label { display:none; }
+.sidebar:hover .nav-group-label,.sidebar:focus-within .nav-group-label,.sidebar.is-pinned .nav-group-label { display:block; }
