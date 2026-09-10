@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { AppShell, CandidateBadge, PageMessage } from "../../components/AppShell";
+import { AppShell, CandidateBadge, PageMessage, WorkflowStepper } from "../../components/AppShell";
 import { PROJECT_ID, PriceReference, PriceResult, fetchPriceReferences, fetchPriceResults, importPriceReferences, requestPriceLookup, savePriceDecision } from "../../components/api";
 
 const sourceOrder = [
@@ -49,6 +49,7 @@ export default function PricesPage() {
 
   return <AppShell eyebrow="NEW ITEM PRICE REVIEW" title="신규내역 단가 검토">
     <div className="price-scope-bar"><span>프로젝트 <strong>광양5 사무동</strong></span><span>적용 순서 <strong>참고단가 → 공식자료 → API</strong></span><span className="candidate-state">자동 적용 금지</span></div>
+    <WorkflowStepper current="price" />
     <p className="lead">출처와 기준일을 비교해 구매부서 적용 후보 또는 보류로 판단합니다. 승인 전 단가는 확정값이 아닙니다.</p>
     {notice && <PageMessage tone={notice.includes("실패") || notice.includes("권한") ? "danger" : "info"}>{notice}</PageMessage>}
     <section className="price-source-order">{sourceOrder.map((source, index) => <div className={`price-source-step ${source.tone}`} key={source.key}><span>0{index + 1}</span><div><strong>{source.title}</strong><small>{source.description}</small></div>{index < sourceOrder.length - 1 && <b className="source-arrow">→</b>}</div>)}</section>

@@ -70,6 +70,11 @@ export function AppShell({ children, eyebrow, title }: { children: React.ReactNo
 
 export function PageMessage({ children, tone = "info" }: { children: React.ReactNode; tone?: "info" | "danger" | "warning" }) { return <div className={`page-message ${tone}`} role="status">{children}</div>; }
 
+export function WorkflowStepper({ current }: { current: "initial" | "change" | "price" }) {
+  const steps = [{ key: "initial", label: "01 최초 자료", href: "/quantities?sourceSet=기준자료" }, { key: "change", label: "02 설계변경", href: "/drawings" }, { key: "price", label: "03 신규내역 단가", href: "/prices?sourceSet=변경자료" }];
+  return <nav className="workflow-stepper" aria-label="핵심 검토 단계">{steps.map(step => <a key={step.key} href={step.href} className={step.key === current ? "active" : ""} aria-current={step.key === current ? "step" : undefined}>{step.label}</a>)}</nav>;
+}
+
 function displayFileName(path?: string) {
   if (!path) return "원본 파일명 확인 필요";
   return path.split(/[\\/]/).pop() || path;

@@ -240,6 +240,10 @@ h3 { font-size:1rem; line-height:1.35; }
 .review-stage-tabs { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 20px; padding:6px; border:1px solid #dce8ec; border-radius:8px; background:#f8fafc; }
 .review-stage-tabs a { padding:8px 13px; border-radius:5px; color:#536b78; font-size:.78rem; text-decoration:none; }
 .review-stage-tabs a:hover,.review-stage-tabs a.active { color:#fff; background:#0e766e; }
+.workflow-stepper { display:flex; gap:6px; margin:14px 0 18px; }
+.workflow-stepper a { padding:6px 10px; border:1px solid #d7e5e9; border-radius:999px; color:#6b8190; background:#fff; font-size:.72rem; text-decoration:none; }
+.workflow-stepper a:hover { border-color:#73c8bd; color:#0e766e; }
+.workflow-stepper a.active { border-color:#0e766e; color:#fff; background:#0e766e; }
 @media (max-width:900px) { .workflow-grid { grid-template-columns:1fr; } }
 .sidebar:not(.is-pinned) .nav-group-label { display:none; }
 .sidebar:hover .nav-group-label,.sidebar:focus-within .nav-group-label,.sidebar.is-pinned .nav-group-label { display:block; }

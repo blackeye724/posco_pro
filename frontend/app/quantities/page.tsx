@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AppShell, CandidateBadge, PageMessage } from "../../components/AppShell";
+import { AppShell, CandidateBadge, PageMessage, WorkflowStepper } from "../../components/AppShell";
 import { fetchQuantityAnalysis, PROJECT_ID, QuantityAnalysis, QuantityAnalysisItem, selectQuantityCandidate } from "../../components/api";
 
 function toneFor(severity?: string) {
@@ -138,6 +138,7 @@ export default function QuantitiesPage() {
 
   return <AppShell eyebrow="QUANTITY / FORMULA / COST" title="내역·수량 오류 분석">
     <div className="quantity-scope-bar"><span>프로젝트 <strong>광양5 사무동</strong></span><span>분석 범위 <strong>내역서 ↔ 수량산출서</strong></span><span className="candidate-state">승인 전 후보값</span></div>
+    <WorkflowStepper current="initial" />
     <p className="lead">광양5 사무동에 등록된 내역서·수량산출서만 분석합니다. 타건물 자료와 참고 단가는 이 화면의 연결 후보에 사용하지 않습니다. 파일 전체를 한 번에 판정하는 화면이 아니라 내역서의 각 항목(원본 행) 단위로 품명·규격·단위·수량을 대조합니다. 변경자료와 직접 연결되지 않은 후보는 기준·변경 대조 대상으로 남기며, 자동 검산이 불가한 항목은 오류로 확정하지 않고 추가 확인 대상으로 유지합니다.</p>
     {notice && <PageMessage tone="danger">{notice}</PageMessage>}
 

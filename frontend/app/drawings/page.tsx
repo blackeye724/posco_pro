@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AppShell, CandidateBadge, PageMessage } from "../../components/AppShell";
+import { AppShell, CandidateBadge, PageMessage, WorkflowStepper } from "../../components/AppShell";
 import { DrawingCandidate, PROJECT_ID, fetchDrawings } from "../../components/api";
 
 function shortFileName(path?: string) {
@@ -38,6 +38,7 @@ export default function DrawingsPage() {
 
   return <AppShell eyebrow="CAD DRAWING DELTA" title="도면 변경부위 검토">
     <div className="drawing-scope-bar"><span>프로젝트 <strong>광양5 사무동</strong></span><span>도면 후보 <strong>{loading ? "—" : `${items.length}건`}</strong></span><span>전처리 근거 <strong>06번 전후 매핑</strong></span><span className="cad-state">CAD 자동 확정 없음</span></div>
+    <WorkflowStepper current="change" />
     <p className="lead">기준·변경 도면의 번호·시트·Rev.를 비교한 후보입니다. 수량·내역 검토 결과와 분리된 흐름이며, CAD 워커가 없거나 연결이 확인되지 않은 경우에도 자동으로 불가 처리하지 않습니다.</p>
     {notice && <PageMessage tone="warning">{notice}</PageMessage>}
     {loading ? <section className="panel cad-loading">도면 변경 후보를 불러오는 중입니다…</section> : !selected ? <section className="panel empty">현재 범위에 도면 변경 후보가 없습니다.</section> : <section className="cad-workspace">
