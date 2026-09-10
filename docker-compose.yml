@@ -1,0 +1,74 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cost_review}
+      POSTGRES_USER: ${POSTGRES_USER:-cost_review}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cost_review}:${POSTGRES_PASSWORD:-change-me}@db:5432/${POSTGRES_DB:-cost_review}
+      PREPROCESSING_DIR: /data/preprocessing
+      UPLOAD_DIR: /data/uploads
+      EXPORT_DIR: /data/exports
+      UPLOAD_MAX_BYTES: ${UPLOAD_MAX_BYTES:-1073741824}
+      UPLOAD_PDF_MAX_BYTES: ${UPLOAD_PDF_MAX_BYTES:-1073741824}
+      UPLOAD_DWG_MAX_BYTES: ${UPLOAD_DWG_MAX_BYTES:-524288000}
+      UPLOAD_SPREADSHEET_MAX_BYTES: ${UPLOAD_SPREADSHEET_MAX_BYTES:-209715200}
+      UPLOAD_CSV_MAX_BYTES: ${UPLOAD_CSV_MAX_BYTES:-524288000}
+      PREPROCESSING_MAX_ATTEMPTS: ${PREPROCESSING_MAX_ATTEMPTS:-5}
+      CORS_ORIGINS: http://localhost:3000
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-true}
+      MVP_CONSTRUCTION_PASSWORD: ${MVP_CONSTRUCTION_PASSWORD:-1234}
+      MVP_DESIGN_PASSWORD: ${MVP_DESIGN_PASSWORD:-12345}
+      MVP_PROCUREMENT_PASSWORD: ${MVP_PROCUREMENT_PASSWORD:-123456}
+      MVP_MASTER_PASSWORD: ${MVP_MASTER_PASSWORD:-1234}
+      PRICE_API_URL: ${PRICE_API_URL:-}
+      PRICE_API_KEY: ${PRICE_API_KEY:-}
+      PRICE_API_SERVICE_NAME: ${PRICE_API_SERVICE_NAME:-PriceInfoService}
+    volumes:
+      - ../전처리결과_20260908:/data/preprocessing:ro
+      - ./uploads:/data/uploads
+      - ./exports:/data/exports
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000/api/v1}
+        NEXT_PUBLIC_USER_ID: ${NEXT_PUBLIC_USER_ID:-pfc391}
+        NEXT_PUBLIC_PROJECT_ID: ${NEXT_PUBLIC_PROJECT_ID:-project-g5-office}
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000/api/v1}
+      NEXT_PUBLIC_USER_ID: ${NEXT_PUBLIC_USER_ID:-pfc391}
+      NEXT_PUBLIC_PROJECT_ID: ${NEXT_PUBLIC_PROJECT_ID:-project-g5-office}
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+node_modules/
+.next/
+.venv/
+mvp-test.db
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.tsbuildinfo
+
+# Local runtime data and uploaded source files stay outside source snapshots.
+uploads/
+exports/
