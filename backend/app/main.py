@@ -4,13 +4,14 @@ import hashlib
 import json
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -85,12 +86,19 @@ from .schemas import (
     SourceFileResponse,
     Stat,
 )
-from .services.preprocessing_reader import PreprocessingReader
+from .services.preprocessing_reader import PreprocessingReader, clear_raw_quantity_cache, infer_work_package
+from .services.quantity_rule_engine import canonical_key as comparison_key, canonical_unit as comparison_unit
 from .services.price_lookup import PriceLookupService
 
 logger = logging.getLogger(__name__)
 from .services.rule_engine import RuleEngine
-from .services.raw_preprocessor import RawPreprocessor
+from .services.raw_preprocessor import RawPreprocessor, is_non_office_scope
+
+
+def is_demo_source_name(value: str | None) -> bool:
+    """Identify only the files created by the local integration smoke test."""
+    name = Path(value or "").name.casefold()
+    return name.startswith("integration-source") or name.startswith("demo_")
 from .services.report_export import execute_review_export
 from .services.auth import verify_password
 
@@ -206,6 +214,8 @@ def dashboard(project_id: str = Query("project-g5-office"), source: Preprocessin
         data = None
     project = db.get(Project, project_id)
     project_name = project.name if project else "공사비 적정성 검토"
+    valid_sources = db.scalars(select(SourceFile).where(SourceFile.project_id == project_id, SourceFile.is_valid.is_(True))).all()
+    demo_source_count = sum(1 for item in valid_sources if is_demo_source_name(item.original_name))
     raw_run_count = int(db.scalar(select(func.count()).select_from(PreprocessingRun).where(PreprocessingRun.project_id == project_id, PreprocessingRun.source_kind == "raw_upload")) or 0)
     if data and raw_run_count == 0 and project_id in {"project-g5-office", "G5-OFFICE"}:
         pending = sum(int(row.get("pending") or 0) for row in data["status_rows"])
@@ -238,6 +248,8 @@ def dashboard(project_id: str = Query("project-g5-office"), source: Preprocessin
         pending_by_area=pending_by_area,
         critical_items=critical_items,
         guardrail="수량·금액·단가는 공사부서 → 설계부서 → 구매부서 승인 전까지 확정하지 않습니다.",
+        data_scope="운영 자료 + 통합 테스트 자료" if demo_source_count else "운영 자료만",
+        demo_source_count=demo_source_count,
     )
 
 
@@ -843,13 +855,15 @@ def import_legacy_preprocessing(project_id: str, background_tasks: BackgroundTas
 
 
 @app.get("/api/v1/projects/{project_id}/warnings", response_model=list[ReviewWarningResponse])
-def project_warnings(project_id: str, severity: str | None = None, status: str | None = None, run_id: str | None = Query(default=None, max_length=100), limit: int = Query(100, ge=1, le=1000), db: Session = Depends(get_db), _: Principal = Depends(require_read)):
+def project_warnings(project_id: str, severity: str | None = None, status: str | None = None, warning_type: str | None = Query(default=None, max_length=100), run_id: str | None = Query(default=None, max_length=100), limit: int = Query(100, ge=1, le=1000), db: Session = Depends(get_db), _: Principal = Depends(require_read)):
     require_project(project_id, db)
     query = select(ReviewWarning).where(ReviewWarning.project_id == project_id)
     if severity:
         query = query.where(ReviewWarning.severity == severity)
     if status:
         query = query.where(ReviewWarning.status == status)
+    if warning_type:
+        query = query.where(ReviewWarning.warning_type == warning_type)
     if run_id:
         # A warning is retained as audit history across reprocessing runs.
         # The intake page needs only the selected run's immutable source rows,
@@ -869,6 +883,61 @@ def project_drawing_candidates(project_id: str, status: str | None = None, limit
         query = query.where(DrawingChangeCandidate.status == status)
     query = query.order_by(DrawingChangeCandidate.created_at.desc()).limit(limit)
     db_items = db.scalars(query).all()
+    # Seeded legacy rows may be newer than the file-backed candidates created
+    # by raw preprocessing. Prefer the latter whenever they exist so that the
+    # response carries real before/after files and linkage evidence.
+    file_backed_query = select(DrawingChangeCandidate).where(
+        DrawingChangeCandidate.project_id == project_id,
+        or_(DrawingChangeCandidate.baseline_file.is_not(None), DrawingChangeCandidate.changed_file.is_not(None)),
+    )
+    if status:
+        file_backed_query = file_backed_query.where(DrawingChangeCandidate.status == status)
+    file_backed_items = db.scalars(file_backed_query.order_by(DrawingChangeCandidate.created_at.desc()).limit(limit)).all()
+    if file_backed_items:
+        db_items = file_backed_items
+    # 도면 후보가 실제 사무동 변경 내역과 연결되는지 읽기 전용으로
+    # 검증한다. 이 단계에서는 MappingCandidate를 자동 확정하지 않고,
+    # 같은 기준/변경 도면번호를 가진 내역서 행의 개수와 품명만 근거로
+    # 반환한다.
+    source_ids = {source_id for item in db_items for source_id in (item.before_file_id, item.after_file_id) if source_id}
+    estimate_rows = []
+    if source_ids:
+        estimate_rows = db.scalars(
+            select(StandardizedItem).where(
+                StandardizedItem.project_id == project_id,
+                StandardizedItem.item_kind == "estimate",
+                StandardizedItem.source_file_id.in_(source_ids),
+            )
+        ).all()
+    estimates_by_source: dict[str, list[StandardizedItem]] = {}
+    for row in estimate_rows:
+        if is_non_office_scope(row.item_name, row.specification, row.building_label, row.drawing_number):
+            continue
+        estimates_by_source.setdefault(row.source_file_id or "", []).append(row)
+
+    def with_link_evidence(item: DrawingChangeCandidate | dict) -> DrawingCandidateResponse:
+        if isinstance(item, dict):
+            response = DrawingCandidateResponse.model_validate(item)
+            return response
+        response = DrawingCandidateResponse.model_validate(item, from_attributes=True)
+        drawing_number = (item.drawing_number or item.sheet_number or "").strip().lower()
+        baseline_matches = [row for row in estimates_by_source.get(item.before_file_id or "", []) if drawing_number and (row.drawing_number or "").strip().lower() == drawing_number]
+        changed_matches = [row for row in estimates_by_source.get(item.after_file_id or "", []) if drawing_number and (row.drawing_number or "").strip().lower() == drawing_number]
+        matches = baseline_matches + changed_matches
+        names = list(dict.fromkeys((row.item_name or "").strip() for row in matches if (row.item_name or "").strip()))[:8]
+        if baseline_matches and changed_matches:
+            link_status = "기준·변경 내역 연결됨"
+        elif changed_matches:
+            link_status = "변경 내역 연결됨·기준 근거 없음"
+        elif baseline_matches:
+            link_status = "기준 내역 연결됨·변경 근거 없음"
+        else:
+            link_status = "내역 연결 근거 없음"
+        return response.model_copy(update={
+            "linked_estimate_count": len(matches),
+            "linked_estimate_names": names,
+            "link_status": link_status,
+        })
     # The seeded project may contain a legacy sample candidate from the first
     # UI mock.  Prefer the immutable 06 mapping output when DB rows do not yet
     # carry a real before/after file pair.  This keeps drawing candidates in
@@ -884,7 +953,7 @@ def project_drawing_candidates(project_id: str, status: str | None = None, limit
             legacy_items = [item for item in legacy_items if item.get("status") == status]
         if legacy_items:
             return [DrawingCandidateResponse.model_validate(item) for item in legacy_items]
-    return [DrawingCandidateResponse.model_validate(item, from_attributes=True) for item in db_items]
+    return [with_link_evidence(item) for item in db_items]
 
 
 @app.get("/api/v1/projects/{project_id}/quantities", response_model=list[ReviewWarningResponse])
@@ -962,6 +1031,7 @@ def select_quantity_candidate(
     db.add(mapping)
     db.add(AuditLog(id=str(uuid4()), user_id=principal.user_id, project_id=project_id, action="quantity.mapping.select_candidate", entity_type="mapping_candidate", entity_id=mapping.id, detail=json.dumps({"estimate_item_id": estimate.id, "quantity_item_id": quantity.id, "comment": request.comment, "auto_confirmed": False}, ensure_ascii=False)))
     db.commit()
+    clear_raw_quantity_cache(project_id)
     return QuantityCandidateSelectionResponse(estimate_item_id=estimate.id, quantity_item_id=quantity.id, status=mapping.status, auto_decision=mapping.auto_decision or "", comment=request.comment)
 
 
@@ -976,11 +1046,239 @@ def project_mapping_results(project_id: str, db: Session = Depends(get_db), _: P
 def project_price_results(project_id: str, db: Session = Depends(get_db), _: Principal = Depends(require_read)):
     require_project(project_id, db)
     rows = db.scalars(select(ProcurementPriceResult).where(ProcurementPriceResult.project_id == project_id).order_by(ProcurementPriceResult.created_at.desc())).all()
-    return [PriceLookupResponse.model_validate(item, from_attributes=True) for item in rows]
+    # 가격 결과는 DB 조회 이력과 전처리 신규내역 대기열을 함께 보여준다.
+    # 79번 대기열은 사무동 전용 산출물이며, 타건물 계약단가 카탈로그와
+    # 달리 실제 연결·승인 대상이다. 기존 시드 DB에는 대기열 중 일부만
+    # 저장되어 있을 수 있으므로 여기서 읽기 전용으로 합쳐 화면 누락을
+    # 방지한다. 값이나 승인 상태를 자동 확정하지는 않는다.
+    try:
+        legacy_rows = PreprocessingReader().prices() if project_id == "project-g5-office" else []
+    except FileNotFoundError:
+        legacy_rows = []
+    legacy_by_candidate: dict[str, dict[str, object]] = {}
+    for item in legacy_rows:
+        for key in (item.get("candidate_id"), item.get("procurement_queue_id")):
+            if key:
+                legacy_by_candidate[str(key)] = item
+    result: list[PriceLookupResponse] = []
+    seen_candidates: set[str] = set()
+    seen_comparison_keys: set[tuple[str, str, str, str, str]] = set()
+    has_persisted_changed_candidates = False
+    reference_rows = db.scalars(
+        select(PriceReference).where(
+            PriceReference.is_active.is_(True),
+            (PriceReference.project_id == project_id) | (PriceReference.source_scope == "other_building_reference"),
+        )
+    ).all()
+
+    def enrich_reference_match(payload: dict[str, object]) -> None:
+        """Attach ranked reference evidence without copying a price value."""
+        item_name = comparison_key(payload.get("item_name"))
+        item_spec = comparison_key(payload.get("specification"))
+        item_unit = comparison_unit(payload.get("unit"))
+        if not item_name:
+            payload.update({"reference_match_count": 0, "reference_match_status": "품명 확인 필요"})
+            return
+        ranked: list[tuple[int, int, PriceReference]] = []
+        for reference in reference_rows:
+            reference_name = comparison_key(reference.standard_item or reference.original_item)
+            if not reference_name or reference_name != item_name:
+                continue
+            reference_unit = comparison_unit(reference.unit)
+            if item_unit and reference_unit and item_unit != reference_unit:
+                continue
+            reference_spec = comparison_key(reference.specification)
+            score = 2
+            if item_spec and reference_spec:
+                if item_spec != reference_spec:
+                    continue
+                score += 2
+            if item_unit and reference_unit:
+                score += 1
+            priority = 0 if reference.project_id == project_id and reference.source_scope != "other_building_reference" else 1
+            ranked.append((score, priority, reference))
+        ranked.sort(key=lambda row: (-row[0], row[1], str(row[2].reference_date or "")), reverse=False)
+        if not ranked:
+            payload.update({"reference_match_count": 0, "reference_match_status": "참고단가 미확인"})
+            return
+        best = ranked[0][2]
+        scope = "동일 프로젝트 자료" if best.project_id == project_id and best.source_scope != "other_building_reference" else "타건물 참고자료"
+        payload.update({
+            "reference_match_count": len(ranked),
+            "best_reference_price": float(best.price) if best.price is not None else None,
+            "best_reference_scope": scope,
+            "reference_match_status": "참고단가 후보 연결" if best.price is not None else "참고항목 연결·단가 없음",
+        })
+
+    def append_payload(payload: dict[str, object]) -> None:
+        candidate_id = str(payload.get("candidate_id") or "").strip()
+        if not candidate_id or candidate_id in seen_candidates:
+            return
+        if payload.get("source_set") in {"기준·변경 대조", "변경자료 신규내역"}:
+            comparison_key = (
+                str(payload.get("source_file_id") or ""),
+                str(payload.get("item_name") or "").strip().casefold(),
+                str(payload.get("specification") or "").strip().casefold(),
+                str(payload.get("unit") or "").strip().casefold(),
+                str(payload.get("changed_quantity") or "").strip(),
+            )
+            if comparison_key in seen_comparison_keys:
+                return
+            seen_comparison_keys.add(comparison_key)
+        enrich_reference_match(payload)
+        seen_candidates.add(candidate_id)
+        result.append(PriceLookupResponse.model_validate(payload))
+
+    for row in rows:
+        # 조회 루프마다 연결 대상을 초기화한다. 이전 행의 객체가 다음
+        # 행으로 누출되지 않도록 하여, 오래된 DB 결과도 안전하게 보강한다.
+        standardized = None
+        source = None
+        # Older preprocessing runs may have persisted comparison candidates
+        # before the office-scope/positive-quantity guard was introduced.
+        # Re-apply the same guard at read time so stale rows cannot leak into
+        # the unit-price queue after an upgrade.
+        if row.service_name == "기준·변경 대조 전처리":
+            standardized = db.get(StandardizedItem, row.standardized_item_id) if row.standardized_item_id else None
+            source = db.get(SourceFile, standardized.source_file_id) if standardized else None
+            if standardized and source and source.version_type == "변경":
+                if standardized.quantity is None or standardized.quantity <= 0:
+                    continue
+                if is_non_office_scope(standardized.item_name, standardized.specification, standardized.building_label, standardized.drawing_number):
+                    continue
+                has_persisted_changed_candidates = True
+        payload = {
+            "id": row.id,
+            "project_id": row.project_id,
+            "candidate_id": row.candidate_id,
+            "lookup_status": row.lookup_status,
+            "item_name": row.item_name,
+            "specification": row.specification,
+            "unit": row.unit,
+            "price": float(row.price) if row.price is not None else None,
+            "service_name": row.service_name,
+            "source_file_id": row.source_file_id,
+            "reference_date": row.reference_date,
+            "created_at": row.created_at,
+        }
+        if row.service_name == "기준·변경 대조 전처리" and standardized and source:
+            payload["source_set"] = "변경자료 신규내역"
+            payload["work_package"] = infer_work_package(standardized.item_name, standardized.specification)
+            # 과거 실행분은 결과 테이블의 source_file_id를 채우기 전에
+            # 저장됐을 수 있으므로, 표준화 내역의 원본 파일을 기준으로
+            # 추적 ID를 보강한다.
+            payload["source_file_id"] = source.id
+            payload["changed_quantity"] = str(standardized.quantity) if standardized.quantity is not None else None
+            payload["evidence"] = f"변경자료 내역서 {source.original_name} · {standardized.source_row_ref or '원본 행'} · 기준자료 표준키 미발견"
+        legacy = legacy_by_candidate.get(row.candidate_id)
+        if legacy:
+            # 시드 결과가 품명/규격을 비워 둔 경우에도 대기열의 원문을
+            # 우선 표시해 구매부서가 무엇을 검토하는지 알 수 있게 한다.
+            payload["item_name"] = payload["item_name"] or legacy.get("standard_key") or "품명 확인 필요"
+            payload["specification"] = payload["specification"] or legacy.get("category")
+            payload["lookup_status"] = payload["lookup_status"] or legacy.get("price_status") or "단가 검토 대기"
+            payload["source_set"] = "변경자료 신규내역"
+            payload["evidence"] = legacy.get("restriction") or "79번 사무동 신규내역 단가검토 대기열"
+        append_payload(payload)
+
+    # DB에 아직 생성되지 않은 79번 신규내역도 후보로 노출한다. 안정적인
+    # ID를 사용하므로 이후 실제 API 조회 결과가 저장되면 candidate_id로
+    # 중복 없이 하나의 항목으로 합쳐진다.
+    for legacy in legacy_rows:
+        candidate_id = str(legacy.get("candidate_id") or "").strip()
+        queue_id = str(legacy.get("procurement_queue_id") or candidate_id)
+        if not candidate_id or candidate_id in seen_candidates or queue_id in seen_candidates:
+            continue
+        stable_id = f"legacy-price-{hashlib.sha256(f'{project_id}|{queue_id}'.encode('utf-8')).hexdigest()[:24]}"
+        append_payload({
+            "id": stable_id,
+            "project_id": project_id,
+            "candidate_id": candidate_id,
+            "lookup_status": legacy.get("price_status") or "단가 검토 대기",
+            "item_name": legacy.get("standard_key") or "품명 확인 필요",
+            "specification": legacy.get("category") or None,
+            "unit": None,
+            "price": None,
+            "service_name": "사무동 신규내역 전처리",
+            "source_file_id": None,
+            "reference_date": None,
+            "created_at": None,
+            "source_set": "변경자료 신규내역",
+            "evidence": legacy.get("restriction") or "79번 사무동 신규내역 단가검토 대기열",
+        })
+
+    # DB 결과가 없는 환경에서도 변경자료의 기준·변경 대조에서 새로 생긴
+    # 내역을 단가 후보로 넘긴다. 비교 결과는 승인 전 검토값이며,
+    # 타건물 자료와는 연결하지 않는다.
+    if project_id == "project-g5-office" and not has_persisted_changed_candidates:
+        # 전체 수량 분석(행별 산출근거 매칭)은 무겁기 때문에 여기서는
+        # 최신 전처리 실행의 내역서 행만 조회해 신규 여부를 빠르게 판별한다.
+        # 동일한 표준키가 기준자료에 있으면 신규가 아니며, 수량 값은
+        # 단가 후보의 참고 문맥으로만 전달한다.
+        latest_run = db.scalar(select(PreprocessingRun).where(PreprocessingRun.project_id == project_id, PreprocessingRun.source_kind == "raw_upload", PreprocessingRun.status == "completed").order_by(PreprocessingRun.created_at.desc()))
+        if latest_run:
+            try:
+                source_ids = json.loads(latest_run.source_file_ids or "[]")
+            except (TypeError, ValueError):
+                source_ids = []
+            current_sources = db.scalars(select(SourceFile).where(SourceFile.id.in_(source_ids))).all() if source_ids else []
+            source_by_id = {source.id: source for source in current_sources}
+            office = db.scalar(select(Building).where(Building.project_id == project_id, Building.name == "사무동"))
+            allowed_ids = {source.id for source in current_sources if source.document_type == "estimate" and (office is None or source.building_id == office.id)}
+            estimate_rows = db.scalars(select(StandardizedItem).where(StandardizedItem.project_id == project_id, StandardizedItem.source_file_id.in_(allowed_ids), StandardizedItem.item_kind == "estimate")).all() if allowed_ids else []
+            current_rows = []
+            for row in estimate_rows:
+                try:
+                    if json.loads(row.notes or "{}").get("run_id") == latest_run.id:
+                        current_rows.append(row)
+                except (TypeError, ValueError):
+                    continue
+            baseline_keys = {(comparison_key(row.normalized_name or row.item_name), comparison_key(row.specification), comparison_unit(row.unit)) for row in current_rows if source_by_id.get(row.source_file_id) and source_by_id[row.source_file_id].version_type == "기준"}
+            seen_new_keys: set[tuple[str, str, str]] = set()
+            for row in current_rows:
+                source = source_by_id.get(row.source_file_id)
+                if not source or source.version_type != "변경":
+                    continue
+                comparison_text = " ".join(str(value or "") for value in (row.item_name, row.specification, row.building_label, row.drawing_number))
+                if is_non_office_scope(row.item_name, row.specification, row.building_label, row.drawing_number):
+                    continue
+                # Deleted/zero quantity rows and section subtotals are not
+                # new purchasable items. They remain visible in quantity and
+                # change reviews, but must not enter the unit-price queue.
+                if row.quantity is None or row.quantity <= 0:
+                    continue
+                key = (comparison_key(row.normalized_name or row.item_name), comparison_key(row.specification), comparison_unit(row.unit))
+                if not key[0] or key in baseline_keys or key in seen_new_keys:
+                    continue
+                seen_new_keys.add(key)
+                item_key = row.item_code or row.normalized_name or row.item_name
+                candidate_id = f"NEW-CMP-{hashlib.sha256(f'{project_id}|{row.id}'.encode('utf-8')).hexdigest()[:16]}"
+                if candidate_id in seen_candidates:
+                    continue
+                append_payload({
+                    "id": f"comparison-price-{candidate_id}",
+                    "project_id": project_id,
+                    "candidate_id": candidate_id,
+                    "lookup_status": "변경 후 신규 · 수량 승인 전 단가 검토 대기",
+                    "item_name": row.item_name or item_key,
+                    "specification": row.specification or item_key,
+                    "unit": row.unit,
+                    "price": None,
+                    "service_name": "기준·변경 대조 전처리",
+                    "source_file_id": row.source_file_id,
+                    "reference_date": None,
+                    "created_at": None,
+                    "source_set": "변경자료 신규내역",
+                    "work_package": infer_work_package(row.item_name, row.specification),
+                    "changed_quantity": str(row.quantity) if row.quantity is not None else None,
+                    "evidence": f"변경자료 내역서 {source.original_name} · {row.source_row_ref or '원본 행'} · 기준자료 표준키 미발견",
+                })
+    return result
 
 
 def _reference_catalog_path() -> Path:
-    return get_settings().preprocessing_dir / "15_타건물_기계약단가_참고.csv"
+    settings = get_settings()
+    return settings.price_reference_csv or (settings.preprocessing_dir / "15_타건물_기계약단가_참고.csv")
 
 
 def _reference_number(value: object) -> float | None:

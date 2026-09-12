@@ -44,6 +44,9 @@ def test_price_lookup_uses_reference_candidate_without_auto_applying(monkeypatch
     reference = tmp_path / "15_타건물_기계약단가_참고.csv"
     reference.write_text("original_item,standard_item,standard_unit,building,estimate_unit_price,provenance,restriction\n품목,표준품목,M2,공장동,12345,approved-row,타건물 참고\n", encoding="utf-8-sig")
     monkeypatch.setenv("PREPROCESSING_DIR", str(tmp_path))
+    # Local demo configuration may point at an explicit reference CSV; this
+    # test exercises the legacy preprocessing-directory fallback instead.
+    monkeypatch.setenv("PRICE_REFERENCE_CSV", "")
     monkeypatch.setenv("PRICE_API_URL", "")
     monkeypatch.setenv("PRICE_API_KEY", "")
     get_settings.cache_clear()
@@ -51,6 +54,19 @@ def test_price_lookup_uses_reference_candidate_without_auto_applying(monkeypatch
     assert result.price == 12345
     assert result.lookup_status.startswith("대체자료 적용 후보")
     assert "fallback" in (result.raw_response or "")
+
+
+def test_price_lookup_uses_explicit_reference_csv_path(monkeypatch, tmp_path):
+    reference = tmp_path / "approved-reference.csv"
+    reference.write_text("original_item,standard_item,standard_unit,building,estimate_unit_price\n품목,표준품목,M2,공장동,54321\n", encoding="utf-8-sig")
+    monkeypatch.setenv("PREPROCESSING_DIR", str(tmp_path / "missing"))
+    monkeypatch.setenv("PRICE_REFERENCE_CSV", str(reference))
+    monkeypatch.setenv("PRICE_API_URL", "")
+    monkeypatch.setenv("PRICE_API_KEY", "")
+    get_settings.cache_clear()
+    result = PriceLookupService().execute(ProcurementPriceResult(id="p-4b", project_id="project", candidate_id="c-4b", service_name="PriceInfoService", item_name="품목", unit="M2"))
+    assert result.price == 54321
+    assert result.lookup_status.startswith("대체자료 적용 후보")
 
 
 def test_official_csv_is_used_before_api(monkeypatch, tmp_path):

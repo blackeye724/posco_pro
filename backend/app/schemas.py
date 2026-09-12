@@ -30,6 +30,8 @@ class Dashboard(BaseModel):
     pending_by_area: list[dict[str, object]]
     critical_items: list[dict[str, object]]
     guardrail: str
+    data_scope: str = "운영 자료만"
+    demo_source_count: int = 0
 
 
 class ReviewItem(BaseModel):
@@ -178,6 +180,9 @@ class QuantityAnalysisItem(BaseModel):
     baseline_source_locator: str | None = None
     changed_source_locator: str | None = None
     comparison_rate: str | None = None
+    comparison_tolerance: str | None = None
+    comparison_tolerance_rate: str | None = None
+    comparison_band: str | None = None
     quantity_context: str | None = None
     quantity_candidates: list[dict[str, object]] = Field(default_factory=list)
     issue_type: str
@@ -389,6 +394,17 @@ class PriceLookupResponse(BaseModel):
     source_file_id: str | None = None
     reference_date: datetime | None = None
     created_at: datetime | None = None
+    # 신규내역 후보의 원천·수량 문맥. 기존 API 조회 결과에는 없을 수 있다.
+    source_set: str | None = None
+    work_package: str | None = None
+    baseline_quantity: str | None = None
+    changed_quantity: str | None = None
+    difference: str | None = None
+    evidence: str | None = None
+    reference_match_count: int = 0
+    best_reference_price: float | None = None
+    best_reference_scope: str | None = None
+    reference_match_status: str = "참고단가 미확인"
 
 
 class PriceDecisionRequest(BaseModel):
@@ -443,6 +459,9 @@ class DrawingCandidateResponse(BaseModel):
     changed_revision: str | None = None
     sheet_number: str | None = None
     next_action: str | None = None
+    linked_estimate_count: int = 0
+    linked_estimate_names: list[str] = []
+    link_status: str = "연결 근거 없음"
 
 
 class EvidenceResponse(BaseModel):

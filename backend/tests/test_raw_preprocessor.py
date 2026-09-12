@@ -1,9 +1,10 @@
 from pathlib import Path
 import zipfile
+from types import SimpleNamespace
 
 from app.services.raw_preprocessor import RawPreprocessor, _is_section_heading
-from app.services.preprocessing_reader import PreprocessingReader, _canonical_unit, _formula_rounding_tolerance, _simple_formula_value, _spec_compatible
-from app.services.quantity_rule_engine import classify_material_relation, compare_quantity, compare_related_totals, compare_version_quantities
+from app.services.preprocessing_reader import PreprocessingReader, _canonical_unit, _formula_rounding_tolerance, _simple_formula_value, _spec_compatible, infer_work_package
+from app.services.quantity_rule_engine import canonical_name, canonical_spec, classify_material_relation, compare_quantity, compare_related_totals, compare_version_quantities, spec_compatible
 
 
 def test_map_row_normalizes_korean_headers_and_numbers():
@@ -60,11 +61,47 @@ def test_material_construction_relation_requires_explicit_role_marker():
     assert classify_material_relation("앵커볼트") is None
 
 
+def test_related_total_missing_role_uses_the_actual_quantity_label():
+    assert compare_related_totals(12, None, quantity_label="m2").result == "시공 m2 연결 근거 없음"
+
+
 def test_version_comparison_reports_direction_without_approval():
     assert compare_version_quantities(100, 100.005).result == "변경 없음(허용오차)"
     assert compare_version_quantities(100, 110).result == "변경 후 증가"
     assert compare_version_quantities(100, 90).result == "변경 후 감소"
     assert compare_version_quantities(None, 90).result == "대조 근거 없음"
+
+
+def test_steel_version_comparison_uses_aggregated_size_bands():
+    # 12.5 -> 12.6 TON is a 0.8% change, so it is within the recommended
+    # 5~50 TON steel reconciliation band (±1%), not a hard mismatch.
+    matched = compare_version_quantities(12.5, 12.6, work_package="철골공사", item_text="H형강", comparison_key="h형강|ss275|ton", unit="TON")
+    assert matched.result == "일치(철골 허용오차 내)"
+    assert matched.comparison_band == "match"
+    assert matched.tolerance_rate == 0.01
+
+    review = compare_version_quantities(12.5, 12.75, work_package="철골공사", item_text="H형강", comparison_key="h형강|ss275|ton", unit="TON")
+    assert review.result == "검토 후보(철골 허용오차 초과)"
+    assert review.comparison_band == "review"
+
+    mismatch = compare_version_quantities(12.5, 13.0, work_package="철골공사", item_text="H형강", comparison_key="h형강|ss275|ton", unit="TON")
+    assert mismatch.result == "변경 후 증가"
+    assert mismatch.comparison_band == "mismatch"
+
+
+def test_steel_large_scope_uses_tighter_band():
+    matched = compare_version_quantities(100, 100.4, work_package="철골공사", item_text="H형강", comparison_key="h형강|ss275|ton", unit="TON")
+    assert matched.result == "일치(철골 허용오차 내)"
+    assert matched.tolerance_rate == 0.005
+
+    review = compare_version_quantities(100, 101.5, work_package="철골공사", item_text="H형강", comparison_key="h형강|ss275|ton", unit="TON")
+    assert review.result == "검토 후보(철골 허용오차 초과)"
+
+
+def test_steel_package_related_nonsteel_item_keeps_generic_rule():
+    hinge = compare_version_quantities(150, 151, work_package="철골공사", item_text="BALL BEARING BUTT HINGE", unit="EA")
+    assert hinge.result == "변경 후 증가"
+    assert hinge.tolerance_rate is None
 
 
 def test_specification_matching_ignores_order_and_punctuation():
@@ -86,7 +123,35 @@ def test_numbered_work_package_heading_is_not_a_review_item():
     # ``03. 사무동`` can occupy the adjacent specification cell.  It is a
     # section label, not an estimate with an implicit quantity.
     assert _is_section_heading("0306. 타일공사", {"specification": "03. 사무동"})
+
+
+def test_work_package_classification_covers_common_office_items():
+    assert infer_work_package("고장력볼트") == "철골공사"
+    assert infer_work_package("레미콘") == "철근콘크리트공사"
+    assert infer_work_package("수밀코킹(10mm각)") == "방수공사"
+    assert infer_work_package("세면대하부장") == "수장공사"
+    assert infer_work_package("플로어힌지설치") == "창호공사"
+    assert infer_work_package("강관비계 설치 및 해체") == "가설공사"
+    assert infer_work_package("승객용엘리베이터") == "승강기공사"
+    assert infer_work_package("SD01[F:1.6T,D:0.8T]") == "창호공사"
+    assert infer_work_package("압출발포폴리스티렌 설치") == "단열공사"
+    assert infer_work_package("앵커 볼트 설치") == "철골공사"
+    assert infer_work_package("되메우고다지기") == "토공사"
+    assert infer_work_package("MORTISE LEVER SET") == "창호공사"
+    assert _is_section_heading("0318. 골재대", {"quantity": 0})
+    assert _is_section_heading("0413 골재대", {"quantity": 0})
+    assert _is_section_heading("12010. 운반비", {"quantity": 0})
     assert not _is_section_heading("타일공사 보수", {"unit": "M2", "quantity": "12"})
+
+
+def test_window_schedule_codes_are_classified_without_promoting_generic_al_items():
+    assert infer_work_package("AW01[150mm AL 단열바]") == "창호공사"
+    assert infer_work_package("AW_E03[2.사무동]") == "창호공사"
+    assert infer_work_package("AWE01[150mm PVC,FIX]") == "창호공사"
+    assert infer_work_package("AL몰딩설치") == "금속공사"
+    assert infer_work_package("DOOR CLOSER") == "창호공사"
+    assert infer_work_package("CT형강") == "철골공사"
+    assert infer_work_package("DRY WALL(C-100)") == "수장공사"
 
 
 def test_csv_rows_keep_source_row_locator(tmp_path: Path):
@@ -144,6 +209,117 @@ def test_drawing_candidates_stay_separate_from_quantity_queue(tmp_path: Path):
     assert rows[0]["baseline_revision"] == "Rev.0"
     assert rows[0]["changed_revision"] == "Rev.F"
     assert rows[0]["status"] == "근거 확인 대기"
+
+
+def test_drawing_pairing_does_not_cross_work_packages_or_buildings():
+    baseline_arch = SimpleNamespace(
+        id="base-arch",
+        drawing_number="101",
+        building_id="office",
+        work_package_id="arch",
+    )
+    baseline_structure = SimpleNamespace(
+        id="base-structure",
+        drawing_number="101",
+        building_id="office",
+        work_package_id="structure",
+    )
+    changed_arch = SimpleNamespace(
+        id="changed-arch",
+        drawing_number="101",
+        building_id="office",
+        work_package_id="arch",
+    )
+    changed_other_building = SimpleNamespace(
+        id="changed-other",
+        drawing_number="101",
+        building_id="warehouse",
+        work_package_id="arch",
+    )
+
+    assert RawPreprocessor._match_baseline_drawing(changed_arch, [baseline_structure, baseline_arch]).id == "base-arch"
+    assert RawPreprocessor._match_baseline_drawing(changed_other_building, [baseline_arch]) is None
+    assert RawPreprocessor._match_baseline_drawing(SimpleNamespace(id="no-number", drawing_number=None, building_id="office", work_package_id="arch"), [baseline_arch]) is None
+
+
+def test_drawing_identity_is_derived_only_from_safe_sheet_patterns():
+    source = SimpleNamespace(
+        drawing_number=None,
+        original_name="광양5-준공-1A-02-DWG-101 사무동 구조 도면목록표_Rev.F.dwg",
+        file_path="",
+        sheet_name=None,
+    )
+    assert RawPreprocessor._drawing_number(source) == "101"
+    assert RawPreprocessor._drawing_discipline(source) == "구조"
+
+    no_sheet = SimpleNamespace(drawing_number=None, original_name="사무동_2026-09-10.dwg", file_path="", sheet_name=None)
+    assert RawPreprocessor._drawing_number(no_sheet) is None
+
+
+def test_raw_upload_quantity_link_uses_shared_canonical_fields():
+    estimate = SimpleNamespace(item_name="도막방수", normalized_name="도막방수", specification="(D.R.A+T4) Φ500", unit="㎡")
+    quantity = SimpleNamespace(item_name="도막방수", normalized_name="도막방수", specification="Φ500, D.R.A+T4", unit="M2")
+    compatible, fields = RawPreprocessor._quantity_field_match(estimate, quantity)
+    assert compatible is True
+    assert fields == set()
+
+    different_unit = SimpleNamespace(item_name="도막방수", normalized_name="도막방수", specification="Φ500, D.R.A+T4", unit="M3")
+    compatible, fields = RawPreprocessor._quantity_field_match(estimate, different_unit)
+    assert compatible is False
+    assert fields == {"단위"}
+
+
+def test_raw_upload_quantity_link_uses_audited_spec_aliases():
+    aliases = [{
+        "original_item": "타일벽코너가드/아웃 [A00-201:6]",
+        "standard_item": "코너비드설치",
+        "original_spec": "AL",
+        "estimate_spec": "알미늄",
+        "original_unit": "M",
+        "standard_unit": "M",
+    }]
+    estimate = SimpleNamespace(item_name="타일벽코너가드/아웃 [A00-201:6]", normalized_name="타일벽코너가드/아웃 [A00-201:6]", specification="AL", unit="M")
+    quantity = SimpleNamespace(item_name="코너비드설치", normalized_name="코너비드설치", specification="알미늄", unit="M")
+    compatible, fields = RawPreprocessor._quantity_field_match(estimate, quantity, aliases)
+    assert compatible is True
+    assert fields == set()
+
+
+def test_canonical_name_applies_audited_alias_only_with_matching_context():
+    aliases = [{
+        "original_item": "무기질탄성도막방수(내부)",
+        "standard_item": "무기질계탄성도막방수",
+        "original_spec": "2회 도포",
+        "estimate_spec": "2회 도포",
+        "original_unit": "M2",
+        "standard_unit": "㎡",
+    }]
+    assert canonical_name("무기질탄성도막방수(내부)", aliases, specification="2회 도포", unit="m²") == "무기질계탄성도막방수"
+    assert canonical_name("무기질탄성도막방수(내부)", aliases, specification="3회 도포", unit="m²") == "무기질탄성도막방수내부"
+
+
+def test_audited_spec_alias_requires_item_and_unit_context():
+    aliases = [{
+        "original_item": "타일벽코너가드/아웃 [A00-201:6]",
+        "standard_item": "코너비드설치",
+        "original_spec": "AL",
+        "estimate_spec": "알미늄",
+        "original_unit": "M",
+        "standard_unit": "M",
+    }]
+    assert canonical_spec("AL", aliases, item_name="타일벽코너가드/아웃 [A00-201:6]", unit="M") == "알미늄"
+    assert spec_compatible(
+        "AL", "알미늄", aliases,
+        left_item="타일벽코너가드/아웃 [A00-201:6]",
+        right_item="코너비드설치",
+        left_unit="M", right_unit="M",
+    )
+    assert not spec_compatible(
+        "AL", "알미늄", aliases,
+        left_item="다른 공종",
+        right_item="코너비드설치",
+        left_unit="M", right_unit="M",
+    )
 
 
 def test_xls_parse_failure_keeps_traceable_error(tmp_path: Path):

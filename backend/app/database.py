@@ -346,6 +346,14 @@ class ProcurementPriceResult(Base, TimestampMixin):
     lookup_status: Mapped[str] = mapped_column(String(50))
     raw_response: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_file_id: Mapped[str | None] = mapped_column(ForeignKey("source_files.id", ondelete="SET NULL"), nullable=True)
+    # Review context for changed-office candidates.  These values remain
+    # provisional until the quantity/design/procurement approvals complete.
+    source_set: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    work_package: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    baseline_quantity: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    changed_quantity: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    difference: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PriceApplicationDecision(Base, TimestampMixin):

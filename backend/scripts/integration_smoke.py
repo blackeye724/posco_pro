@@ -21,7 +21,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.database import Department, Role, SessionLocal, User, UserRole
 
 
-API = os.getenv("INTEGRATION_API_BASE", "http://127.0.0.1:8000/api/v1")
+# Local Next.js development uses the API on 8001 by default (see
+# frontend/components/api.ts). Docker deployments still pass 8000 explicitly
+# through INTEGRATION_API_BASE when the compose API is used.
+API = os.getenv("INTEGRATION_API_BASE", "http://127.0.0.1:8001/api/v1")
 HEALTH = os.getenv("INTEGRATION_HEALTH_URL", API.removesuffix("/api/v1") + "/health")
 PROJECT_ID = os.getenv("NEXT_PUBLIC_PROJECT_ID", "project-g5-office")
 INTEGRATION_USER = os.getenv("INTEGRATION_USER_ID", "pfc391")
@@ -33,7 +36,10 @@ def request(path: str, method: str = "GET", body: dict | None = None, user: str 
         headers["X-User-Id"] = user or INTEGRATION_USER
     payload = json.dumps(body).encode("utf-8") if body is not None else None
     try:
-        with urlopen(Request(f"{API}{path}", method=method, data=payload, headers=headers), timeout=20) as response:
+        # Quantity analysis is intentionally row-based and may scan the full
+        # office workbook set after a new upload. Keep the smoke client from
+        # declaring a healthy asynchronous/API path failed at 20 seconds.
+        with urlopen(Request(f"{API}{path}", method=method, data=payload, headers=headers), timeout=120) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
@@ -135,14 +141,16 @@ def main() -> None:
     status, duplicate = multipart_request(f"/projects/{PROJECT_ID}/files", "integration-source.pdf", large_pdf, upload_fields, "pfc391")
     assert status == 201 and duplicate["id"] == uploaded["id"] and duplicate["sha256"] == uploaded["sha256"] and duplicate["preprocessing_run_id"] == uploaded["preprocessing_run_id"], "duplicate upload reuse"
     # 동일 논리 식별자(문서 유형/도면번호/시트/Rev.)의 다른 해시는 별도 원본으로 보존하고 충돌 경고를 남긴다.
-    conflict_content = b"%PDF-1.7\nconflicting-revision-content"
+    # Keep the conflict payload unique across repeated local smoke runs so it
+    # cannot be treated as a duplicate upload from a previous run.
+    conflict_content = b"%PDF-1.7\nconflicting-revision-content-" + uuid4().hex.encode("ascii")
     status, conflict_upload = multipart_request(f"/projects/{PROJECT_ID}/files", "integration-source-conflict.pdf", conflict_content, upload_fields, "pfc391")
     assert status == 201 and conflict_upload["id"] != uploaded["id"] and conflict_upload["sha256"] != uploaded["sha256"], "revision conflict source preserved"
-    _, conflict_warnings = request(f"/projects/{PROJECT_ID}/warnings?limit=200")
+    _, conflict_warnings = request(f"/projects/{PROJECT_ID}/warnings?warning_type=same_revision_content_conflict&limit=10")
     assert any(item["warning_type"] == "same_revision_content_conflict" for item in conflict_warnings), "revision conflict warning"
     checks.append("duplicate-reuse-and-revision-conflict")
-    for filename, signature in (("integration-source.dwg", b"AC1032"), ("integration-source.xlsx", b"PK\x03\x04")):
-        status, result = multipart_request(f"/projects/{PROJECT_ID}/files", filename, signature + b"integration-test", {"document_type": "source"}, "pfc391")
+    for filename, signature, document_type in (("integration-source.dwg", b"AC1032", "drawing"), ("integration-source.xlsx", b"PK\x03\x04", "estimate")):
+        status, result = multipart_request(f"/projects/{PROJECT_ID}/files", filename, signature + b"integration-test", {"document_type": document_type, "version_type": "기준"}, "pfc391")
         assert status == 201 and result["is_valid"], f"upload {filename}"
     multipart_expect_error(f"/projects/{PROJECT_ID}/files", "integration-source.exe", b"MZ", {}, "pfc391", 415)
     checks.append("upload-validation-and-traceability")
@@ -150,8 +158,11 @@ def main() -> None:
     preprocessing_run_id = uploaded.get("preprocessing_run_id")
     assert preprocessing_run_id and uploaded.get("preprocessing_status") in {"queued", "running", "completed"}, "raw preprocessing job created"
     current_preprocessing = None
-    for _ in range(40):
-        time.sleep(0.25)
+    # A raw run includes every validated source in the project, not only the
+    # tiny smoke files. Allow enough time for the real office workbook set.
+    preprocessing_timeout = max(30, int(os.getenv("INTEGRATION_PREPROCESS_TIMEOUT", "300")))
+    for _ in range(preprocessing_timeout * 2):
+        time.sleep(0.5)
         _, current_preprocessing = request(f"/projects/{PROJECT_ID}/preprocessing")
         runs = current_preprocessing.get("runs", [])
         matching = [run for run in runs if run["id"] == preprocessing_run_id]
@@ -212,7 +223,10 @@ def main() -> None:
     assert status == 202 and export["status"] in {"queued", "running", "completed", "completed_with_warning"}, "report export accepted"
     export_id = export["id"]
     export_status = export
-    for _ in range(60):
+    # CSV/HTML fallback export can take longer than the short API job checks,
+    # especially when the office run contains tens of thousands of rows.
+    # Allow up to one minute before declaring the asynchronous export stuck.
+    for _ in range(240):
         if export_status["status"] in {"completed", "completed_with_warning", "failed"}:
             break
         time.sleep(0.25)

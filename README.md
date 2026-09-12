@@ -93,20 +93,21 @@ $env:UPLOAD_DIR = "C:\Users\LG\Desktop\교육자료\실전자료\cost-review-mvp
 $env:EXPORT_DIR = "C:\Users\LG\Desktop\교육자료\실전자료\cost-review-mvp\exports"
 $env:PREPROCESSING_DIR = "C:\Users\LG\Desktop\교육자료\실전자료\전처리결과_20260908" # 관리자 보조 경로(선택)
 alembic upgrade head
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8001
 
 # 별도 터미널: 웹
 cd frontend
 npm install
-$env:NEXT_PUBLIC_API_BASE_URL = "http://localhost:8000/api/v1"
+# 로컬 개발 기본값은 8001입니다. 8000을 사용할 경우 이 값을 8000으로 맞춥니다.
+$env:NEXT_PUBLIC_API_BASE_URL = "http://localhost:8001/api/v1"
 npm run dev
 ```
 
 ### 로컬 접속 주소
 
 - 웹 검토 화면: `http://localhost:3000`
-- FastAPI 문서: `http://localhost:8000/docs`
-- FastAPI 상태: `http://localhost:8000/health`
+- FastAPI 문서: `http://localhost:8001/docs`
+- FastAPI 상태: `http://localhost:8001/health`
 - PostgreSQL: `localhost:5432` (`cost_review` / `.env`의 계정)
 
 ### 전체 통합 스모크 테스트
@@ -115,7 +116,7 @@ API를 실행한 상태에서 별도 터미널에서 아래 명령을 실행하�
 
 ```powershell
 cd backend
-$env:INTEGRATION_API_BASE = "http://localhost:8000/api/v1"
+$env:INTEGRATION_API_BASE = "http://localhost:8001/api/v1"
 .venv\Scripts\python.exe scripts/integration_smoke.py
 ```
 
@@ -134,7 +135,7 @@ $env:INTEGRATION_API_BASE = "http://localhost:8000/api/v1"
 | 조달청 오류 | 인증키/URL 미설정·네트워크/HTTP 오류를 적용 대기 상태로 보존 |
 | 프론트 연결 | Next.js `/`, `/upload`, `/drawings`, `/quantities`, `/prices`, `/approvals`, `/history` production build 및 API 계약 확인 |
 
-현재 raw-only 경로는 CSV/XLSX/XLSM의 행·열 표준화와 선택적 PDF 페이지 텍스트 추출(`pypdf` 설치 시)을 지원하고, PDF 텍스트가 없거나 파서가 실패·미설치인 영역은 `추가 확인 필요` 상태로 보존합니다. DWG는 헤더 버전·원본 경로를 보존하며, 전처리에서 사용한 ZWCAD·CAD 뷰어·추출도구는 향후 Windows CAD 분석 워커에 연결해 재사용할 수 있습니다. CAD 워커가 없거나 라이선스 범위를 벗어난 작업은 메타데이터와 원본 근거만 남기고 자동 확정하지 않습니다. 파일을 개별 업로드해도 업로드 시점의 프로젝트 전체 검증 원본을 하나의 전처리 실행으로 묶어 수량산출서·내역서·도면 연결 후보를 생성합니다. 전처리 작업은 실행 횟수와 오류를 `preprocessing_runs`에 저장하고, 각 원본값·표준화값은 `preprocessing_records`에 실행별로 저장합니다. 업로드 화면의 `선택 실행 결과 로딩` 또는 `GET /preprocessing/runs/{run_id}/records`로 나중에 필요한 결과만 다시 검토할 수 있습니다. 일시 오류 시 최대 5회 자동 재시도하며, 최종 실패 작업은 재시도 API로 다시 접수할 수 있습니다. 기존 `전처리결과_20260908` 결과는 관리자용 가져오기·회귀검증 경로입니다.
+현재 raw-only 경로는 CSV/XLSX/XLSM의 행·열 표준화와 선택적 PDF 페이지 텍스트 추출(`pypdf` 설치 시)을 지원하고, PDF 텍스트가 없거나 파서가 실패·미설치인 영역은 `추가 확인 필요` 상태로 보존합니다. DWG는 헤더 버전·원본 경로를 보존하며, 도면번호를 입력하지 않아도 `DWG-101`·`A-101`·`S_201` 같은 안전한 파일명 패턴을 보조 식별자로 사용합니다. 기준·변경 도면 후보는 건물·공종 패키지를 먼저 대조하고, 기존 매핑을 재생성하지 않으며 동일 파일 재실행 시 중복 후보를 만들지 않습니다. 사무동에서 감사된 품명·규격 별칭은 품명과 단위 문맥을 함께 확인한 뒤 신규 업로드와 기존 결과에 공통 적용하고, 등록되지 않은 동의어는 추정하지 않고 검토 후보로 보존합니다. 통합 스모크가 만든 `integration-source*`·`demo_*` 원본은 대시보드에 운영 자료와 별도로 포함 상태를 표시해 테스트 수치가 실자료로 오인되지 않게 합니다. 수량·도면·통합검토·단가 화면의 `자료 범위` 필터는 별도 프로젝트나 데이터베이스를 만들지 않고 운영 자료와 통합 테스트 자료를 구분하며, 선택값을 URL의 `dataScope` 파라미터에 보존해 화면 이동·새로고침 후에도 같은 범위를 유지합니다. 전처리에서 사용한 ZWCAD·CAD 뷰어·추출도구는 향후 Windows CAD 분석 워커에 연결해 재사용할 수 있습니다. CAD 워커가 없거나 라이선스 범위를 벗어난 작업은 메타데이터와 원본 근거만 남기고 자동 확정하지 않습니다. 파일을 개별 업로드해도 업로드 시점의 프로젝트 전체 검증 원본을 하나의 전처리 실행으로 묶어 수량산출서·내역서·도면 연결 후보를 생성합니다. 전처리 작업은 실행 횟수와 오류를 `preprocessing_runs`에 저장하고, 각 원본값·표준화값은 `preprocessing_records`에 실행별로 저장합니다. 업로드 화면의 `선택 실행 결과 로딩` 또는 `GET /preprocessing/runs/{run_id}/records`로 나중에 필요한 결과만 다시 검토할 수 있습니다. 일시 오류 시 최대 5회 자동 재시도하며, 최종 실패 작업은 재시도 API로 다시 접수할 수 있습니다. 기존 `전처리결과_20260908` 결과는 관리자용 가져오기·회귀검증 경로입니다.
 표준 품명·규격·단위 사전은 `pfm391`만 발행·수정하고, 공사·설계·구매부서는 근거를 첨부한 수정 요청만 제출합니다. 사전 변경은 새 전처리부터 적용하며 기존 검토 결과에는 소급하지 않고, 프로젝트별 예외와 변경 이력을 별도로 보존합니다.
 동일 SHA-256 파일을 다시 올리면 기존 원본·전처리 실행에 연결하고 중복 업로드만 감사 로그에 기록합니다. 다른 내용의 동일 Rev. 파일은 원본을 덮어쓰지 않고 새 파일·새 전처리 회차로 보존하며 `동일 Rev. 내용 상충` 경고를 생성합니다.
 
@@ -206,6 +207,8 @@ MVP 공식 승인·보관 결과물은 상세 Excel, 요약 PDF, 원본 근거 M
 - `/approvals`: 공사부서 → 설계부서 → 구매부서 순차 승인 대기열
 - `/history`: 부서별 승인·수정 요청·반려·오탐 감사 이력
 
+데모자료 기준 최종 확인 항목과 실행 검증 결과는 [`MVP_QA_CHECKLIST.md`](./MVP_QA_CHECKLIST.md)에 기록합니다.
+
 모든 화면은 `evidence_references`를 통해 원본 파일 경로, 시트, 행, 도면번호, 판정 사유, 추출 신뢰도를 함께 표시합니다. 수량·금액·단가는 후보값 또는 검토 대기로만 보이며, 최종 승인 전에는 확정값으로 표시하지 않습니다.
 
 ### 검토 결과 패키지
@@ -233,3 +236,4 @@ MVP 공식 승인·보관 결과물은 상세 Excel, 요약 PDF, 원본 근거 M
 ## 다음 확장 단계
 
 단가 검토는 동일 프로젝트 타건물의 승인 참고단가를 먼저 확인하고, 공식 조달청 CSV·표준시장단가가 있으면 조달청 API보다 먼저 검토 후보로 사용합니다. 두 자료가 모두 없을 때만 PriceInfoService API를 조회합니다. 모든 후보는 구매부서 승인 전 자동 확정하지 않으며 출처·기준일·적용 사유를 기록합니다. 관리자가 `price-references/import`를 실행하면 CSV의 품명·표준품명·규격·단위·건물·단가·출처·제한사항이 `price_reference_catalog`에 저장됩니다. 동일 프로젝트의 다른 건물에서 일치하는 내역은 신규내역 단가 후보로 제안할 수 있지만 구매부서 승인 전 자동 확정하지 않습니다. 다른 프로젝트 단가는 출처 프로젝트·건물·기준일을 표시하는 참고자료로만 조회하며 자동 후보 적용하지 않습니다. 후속 단계에서는 PDF OCR 고도화, DWG 객체·좌표 비교 worker, 인증된 PriceInfoService 재조회를 연결합니다. 정상 운영의 기본 경로는 원본 업로드→비동기 전처리→규칙 검토이며, 기존 전처리 결과는 관리자용 보조 경로로 유지합니다.
+참고단가 CSV는 기본적으로 `PREPROCESSING_DIR/15_타건물_기계약단가_참고.csv`에서 읽으며, 운영 환경에서 별도 위치를 사용할 때는 `PRICE_REFERENCE_CSV` 환경변수로 명시할 수 있습니다. 파일이 없으면 신규내역은 `참고단가 미확인` 상태로 남고 자동 적용되지 않습니다.

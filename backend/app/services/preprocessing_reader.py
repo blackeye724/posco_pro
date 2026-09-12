@@ -1,14 +1,16 @@
 """원본 전처리 CSV를 읽되 절대 수정하지 않는 읽기 전용 어댑터."""
 
 import csv
+import copy
 import json
 import hashlib
 import re
+import time
 from collections import Counter
 from pathlib import Path
 
 from ..config import get_settings
-from .raw_preprocessor import _is_section_heading
+from .raw_preprocessor import _is_section_heading, is_non_office_scope
 from .quantity_rule_engine import (
     canonical_key as _engine_canonical_key,
     canonical_unit as _engine_canonical_unit,
@@ -24,28 +26,59 @@ from .quantity_rule_engine import (
 )
 
 
+# Raw quantity analysis combines thousands of immutable rows and evidence
+# candidates. Keep the latest request briefly in-process so every page and
+# filter refresh does not repeat the same expensive calculation. The cache is
+# keyed by preprocessing run and query parameters; a new run automatically
+# gets a new key, and manual candidate selection explicitly invalidates it.
+_RAW_QUANTITY_CACHE: dict[tuple[object, ...], tuple[float, dict]] = {}
+_RAW_QUANTITY_CACHE_TTL_SECONDS = 600.0
+
+
+def clear_raw_quantity_cache(project_id: str | None = None) -> None:
+    """Invalidate cached raw quantity analysis after a review mutation."""
+    if project_id is None:
+        _RAW_QUANTITY_CACHE.clear()
+        return
+    for key in list(_RAW_QUANTITY_CACHE):
+        if key and key[0] == project_id:
+            _RAW_QUANTITY_CACHE.pop(key, None)
+
+
 _WORK_PACKAGE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("방수공사", ("방수", "우레탄", "도막")),
-    ("조적공사", ("조적", "벽돌", "블록")),
-    ("철골공사", ("철골", "H-", "H형", "SG", "강재", "ST'L", "스틸")),
-    ("철근콘크리트공사", ("철근", "콘크리트", "거푸집", "HD", "D13", "D16", "D22", "무근")),
-    ("토공사", ("토공", "터파기", "되메우기", "잔토", "굴착", "잡석", "토사")),
-    ("타일공사", ("타일",)),
-    ("석공사", ("화강석", "석재", "돌붙임", "물갈기")),
-    ("유리공사", ("유리", "복층유리", "강화유리")),
-    ("금속공사", ("금속", "알루미늄", "알미늄", "코너비드", "후레싱", "난간")),
-    ("미장공사", ("몰탈", "모르타르", "미장", "시멘트")),
+    ("가설공사", ("강관비계", "비계", "현장정리", "먹매김", "규준틀", "타격지점 표시")),
+    ("단열공사", ("압출발포폴리스티렌", "완충스티로폼", "단열재", "단열판")),
+    ("방수공사", ("방수", "우레탄", "도막", "수밀코킹", "방습필름", "지수판")),
+    ("조적공사", ("조적", "벽돌", "블록", "빗물받이블럭")),
+    ("철골공사", ("철골", "H-", "H형", "형강", "고장력볼트", "앵커볼트", "앵커 볼트", "anchor bolt", "HILTI HY200", "압연강판", "철강설", "각형각관", "SG", "강재", "ST'L", "스틸")),
+    ("철근콘크리트공사", ("철근", "콘크리트", "레미콘", "거푸집", "유로폼", "와이어메시", "데크플레이트", "HD", "D13", "D16", "D22", "무근")),
+    ("토공사", ("토공", "터파기", "되메우기", "되메우고다지기", "잔토", "굴착", "잡석", "자갈", "토사")),
+    ("타일공사", ("타일", "치장줄눈", "신축줄눈")),
+    ("석공사", ("화강석", "석재", "돌붙임", "물갈기", "카운터-마블", "카운터마블", "인조대리석")),
+    ("유리공사", ("유리", "복층유리", "강화유리", "불투명시트")),
+    ("금속공사", ("금속", "알루미늄", "알미늄", "코너비드", "후레싱", "난간", "몰딩", "트랜치커버", "트렌치커버", "al frame", "al프레임", "al base", "프레임", "grill", "그릴", "캐노피", "베이스찬넬", "핸드레일", "손잡이", "루버", "간판", "점자안내도", "key cabinet", "재료분리대", "창상부보강틀", "방습거울후레임", "방습거울설치", "점검사다리", "하지틀")),
+    ("미장공사", ("몰탈", "모르타르", "미장", "시멘트", "JOINT FILLER", "줄눈", "조면처리")),
     ("도장공사", ("도장", "에폭시", "코팅", "페인트")),
-    ("수장공사", ("석고보드", "장판", "벽지", "천장", "마감")),
+    ("수장공사", ("석고보드", "장판", "벽지", "천장", "마감", "dry wall", "drywall", "스터드", "세면대하부장", "흡음텍스", "커텐박스", "화장실칸막이", "소변기칸막이", "악세스플로어", "access floor", "열처리목재데크", "PVC걸레받이")),
     ("패널공사", ("패널", "판넬", "샌드위치")),
-    ("창호공사", ("창호", "문", "셔터")),
+    # Door/window schedules often use English hardware names instead of
+    # ``창호``. This changes only the filter label and never creates a link.
+    ("창호공사", ("창호", "문", "셔터", "소방관 진입창", "lockset", "lever lock", "flush bolt", "dust proof strike", "door stop", "door closer", "door coordinator", "deadlock", "cylindrical", "half cylinder", "hardware", "pivot", "floor closer", "mortise cylinder", "thumbturn cylinder", "mortise lever set", "mortise lock body", "도아체크", "도어체크", "힌지", "플로어힌지")),
     ("홈통공사", ("홈통", "드레인")),
+    ("승강기공사", ("엘리베이터", "승객용")),
 )
 
 
 def infer_work_package(*values: object) -> str:
     """내역서 공사분류 명칭으로 후보 항목을 분류한다."""
     text = " ".join(str(value or "") for value in values).upper()
+    # 창호 리스트의 타입 코드(AW01, AD01, AL01 등)는 품명 대신 식별자로
+    # 쓰이는 경우가 많다. 숫자까지 붙은 코드만 창호로 해석해 ``AL몰딩``
+    # 같은 일반 금속자재를 잘못 분류하지 않는다.
+    if re.search(r"\b(?:AWE|AW|AD|AG|AL)(?:[_-]?[A-Z])?[_-]?\d+", text):
+        return "창호공사"
+    if re.search(r"\b(?:SD|SSW)\d{2}\b", text):
+        return "창호공사"
     for label, keywords in _WORK_PACKAGE_RULES:
         if any(keyword.upper() in text for keyword in keywords):
             return label
@@ -354,8 +387,12 @@ class PreprocessingReader:
                 "source_rows": group["source_rows"],
                 "rule": "철골 자재·시공 TON 총량 비교 / 도장·내화는 산식 근거로 별도 확인",
             })
-        if not summary and steel_sources_without_metadata:
-            return [{
+        if steel_sources_without_metadata:
+            # Keep a per-source preprocessing gap even when another steel
+            # source produced a valid relation group.  Previously these files
+            # disappeared whenever ``summary`` was non-empty, making a
+            # partially extractable upload look fully checked.
+            summary.extend([{
                 "version": "현재 자료 세트",
                 "member_class": "철골 자재·부재 분류",
                 "material_ton": None,
@@ -363,34 +400,63 @@ class PreprocessingReader:
                 "difference_ton": None,
                 "paint_evidence_count": 0,
                 "result": "원본 분류 열 미추출",
-                "source_rows": steel_sources_without_metadata[:5],
+                "source_rows": [source_name],
                 "rule": "현재 등록 철골 원본에는 물량(TON)·자재구분·부재구분 열이 없어 총량 연계 판정을 보류",
-            }]
+            } for source_name in steel_sources_without_metadata])
         return sorted(summary, key=lambda item: (str(item["version"]), str(item["member_class"])))
 
-    def _material_construction_relation_summary(self, quantities: list, source_by_id: dict) -> list[dict[str, object]]:
+    def _material_construction_relation_summary(self, estimates: list, quantities: list, source_by_id: dict) -> list[dict[str, object]]:
         """Summarize explicit material↔construction relation candidates.
 
-        This is an evidence panel, not an approval decision. Rows without an
-        explicit family/role marker are omitted instead of being fuzzy-joined.
+        This is an evidence panel, not an approval decision. The estimate row
+        is the material-side baseline and the quantity-calculation row is the
+        construction-side evidence. Explicit role markers always win; when a
+        source omits role columns, the document kind supplies only this
+        conservative fallback (estimate=material, quantity=construction).
+        No fuzzy name-only join is used for the item-level judgement.
         """
-        groups: dict[tuple[str, str, str], dict[str, object]] = {}
-        for item in quantities:
+        groups: dict[tuple[str, str, str, str], dict[str, object]] = {}
+        family_tokens = {
+            "앵커볼트": ("앵커볼트", "anchor bolt"),
+            "방수": ("방수재", "우레탄", "도막방수", "방수"),
+            "타일": ("타일",),
+            "조적": ("조적", "벽돌", "블록"),
+            "콘크리트": ("콘크리트", "레미콘", "거푸집", "철근"),
+            "도장": ("도장", "페인트", "에폭시"),
+            "미장": ("미장", "몰탈", "모르타르"),
+            "토공": ("토공", "터파기", "되메우기", "잡석"),
+            "석공": ("석공", "화강석", "석재", "인조대리석"),
+            "금속": ("금속", "알루미늄", "후레싱", "난간", "몰딩"),
+            "창호": ("창호", "힌지", "도어", "문", "셔터"),
+        }
+
+        def family_from_text(*values: object) -> str | None:
+            text = _clean_text(" ".join(str(value or "") for value in values)).lower()
+            return next((name for name, tokens in family_tokens.items() if any(token in text for token in tokens)), None)
+
+        role_rows = [(item, "재료") for item in estimates] + [(item, "시공") for item in quantities]
+        for item, fallback_role in role_rows:
             source = source_by_id.get(item.source_file_id)
             source_name = source.original_name if source else ""
             relation = classify_material_relation(item.item_name, item.specification, item.notes)
-            if not relation:
+            if relation:
+                family, role = relation
+            else:
+                family = family_from_text(item.item_name, item.specification, item.notes)
+                role = fallback_role if family else None
+            if not family:
                 continue
-            family, role = relation
             # 철골은 TON·부재군 전용 패널에서 별도로 비교한다.
             if family == "철골":
                 continue
             unit = _canonical_unit(item.unit) or "단위 미기록"
             version = source.version_type if source else "미지정"
-            key = (version, family, unit)
+            work_package = infer_work_package(item.item_name, item.specification, source_name)
+            key = (version, family, unit, work_package)
             group = groups.setdefault(key, {
                 "version": version,
                 "relation_family": family,
+                "work_package": work_package,
                 "unit": unit,
                 "material_quantity": 0.0,
                 "construction_quantity": 0.0,
@@ -416,19 +482,21 @@ class PreprocessingReader:
             relation_result = compare_related_totals(
                 group["material_quantity"] if group["material_count"] else None,
                 group["construction_quantity"] if group["construction_count"] else None,
+                quantity_label=group["unit"],
             )
             result.append({
                 "version": group["version"],
                 "relation_family": group["relation_family"],
+                "work_package": group["work_package"],
                 "unit": group["unit"],
                 "material_quantity": self._display_number(group["material_quantity"]) if group["material_count"] else None,
                 "construction_quantity": self._display_number(group["construction_quantity"]) if group["construction_count"] else None,
                 "difference": self._display_number(relation_result.difference),
                 "result": relation_result.result,
                 "source_rows": group["source_rows"],
-                "rule": "명시적 재료·시공 역할과 동일 단위의 총량만 관계 후보로 비교",
+                "rule": "내역서=재료 기준·수량산출서=시공 근거(명시 역할 우선), 동일 공종·단위 총량만 후보 비교",
             })
-        return sorted(result, key=lambda item: (str(item["version"]), str(item["relation_family"]), str(item["unit"])))
+        return sorted(result, key=lambda item: (str(item["version"]), str(item["work_package"]), str(item["relation_family"]), str(item["unit"])))
 
     def _baseline_changed_comparison(self, items: list[dict[str, object]]) -> list[dict[str, object]]:
         """Aggregate baseline/changed estimate rows by the same office item key."""
@@ -438,6 +506,12 @@ class PreprocessingReader:
             if source_set not in ("기준자료", "변경자료"):
                 continue
             item_key = str(item.get("item_key") or "").strip()
+            # 철골처럼 변경자료에서 동일 품명·규격·단위가 여러 내역
+            # 코드로 분리될 수 있는 공종은 코드가 아니라 표준화된
+            # 품명군을 합산 키로 사용한다. 표시용 item_key는 첫 행의
+            # 코드·키를 유지하되, 비교 집계만 canonical key로 묶는다.
+            comparison_key = str(item.get("comparison_key") or item_key).strip()
+            comparison_unit = str(item.get("comparison_unit") or "").strip()
             work_package = str(item.get("work_package") or "미분류·원천 확인 필요").strip()
             if not item_key:
                 continue
@@ -445,10 +519,12 @@ class PreprocessingReader:
                 quantity = float(item.get("original_value")) if item.get("original_value") is not None else None
             except (TypeError, ValueError):
                 quantity = None
-            key = (work_package, item_key)
+            key = (work_package, comparison_key)
             group = groups.setdefault(key, {
                 "work_package": work_package,
                 "item_key": item_key,
+                "comparison_key": comparison_key,
+                "comparison_unit": comparison_unit,
                 "item_text": item.get("item_text") or item_key,
                 "baseline_quantity": None,
                 "changed_quantity": None,
@@ -471,26 +547,49 @@ class PreprocessingReader:
 
         result: list[dict[str, object]] = []
         for group in groups.values():
-            if not group["baseline_count"] or not group["changed_count"]:
+            if not group["baseline_count"] and not group["changed_count"]:
                 continue
-            comparison = compare_version_quantities(group["baseline_quantity"], group["changed_quantity"])
+            if group["baseline_count"] and group["changed_count"]:
+                comparison = compare_version_quantities(
+                    group["baseline_quantity"],
+                    group["changed_quantity"],
+                    work_package=group["work_package"],
+                    item_text=group["item_text"],
+                    comparison_key=group["comparison_key"],
+                    unit=group["comparison_unit"],
+                )
+                result_label = comparison.result
+            elif group["changed_count"]:
+                comparison = None
+                result_label = "변경 후 신규"
+            else:
+                comparison = None
+                result_label = "기준자료에만 존재"
             result.append({
                 "work_package": group["work_package"],
                 "item_key": group["item_key"],
                 "item_text": group["item_text"],
                 "baseline_quantity": self._display_number(group["baseline_quantity"]),
                 "changed_quantity": self._display_number(group["changed_quantity"]),
-                "difference": self._display_number(comparison.difference),
-                "difference_rate": f"{comparison.difference_rate * 100:.2f}%" if comparison.difference_rate is not None else None,
-                "result": comparison.result,
+                "difference": self._display_number(comparison.difference) if comparison else None,
+                "difference_rate": f"{comparison.difference_rate * 100:.2f}%" if comparison and comparison.difference_rate is not None else None,
+                "comparison_band": comparison.comparison_band if comparison else None,
+                "comparison_tolerance": self._display_number(comparison.tolerance) if comparison else None,
+                "comparison_tolerance_rate": f"{comparison.tolerance_rate * 100:g}%" if comparison and comparison.tolerance_rate is not None else None,
+                "comparison_rule": comparison.rule_label if comparison else None,
+                "result": result_label,
                 "baseline_count": group["baseline_count"],
                 "changed_count": group["changed_count"],
                 "source_rows": group["source_rows"],
                 "baseline_source_rows": group["baseline_source_rows"],
                 "changed_source_rows": group["changed_source_rows"],
-                "rule": "내역서 표준키·공종별 기준/변경 원본 수량 합계 대조(승인 전 비교값)",
+                "rule": comparison.rule_label if comparison and comparison.rule_label else "내역서 표준키·공종별 기준/변경 원본 수량 합계 대조(승인 전 비교값)",
             })
-        return sorted(result, key=lambda item: (str(item["work_package"]), str(item["item_key"])))[:500]
+        # The main item table is paginated, but the comparison summary is the
+        # source for work-package filters and the steel aggregate panel.  Do
+        # not truncate it before sorting: a 500-row cap hid later packages
+        # such as 철골공사 even though their baseline/changed groups existed.
+        return sorted(result, key=lambda item: (str(item["work_package"]), str(item["item_key"])))
 
     @staticmethod
     def _comparison_items(project_id: str, comparisons: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -498,8 +597,9 @@ class PreprocessingReader:
         items: list[dict[str, object]] = []
         for row in comparisons:
             result = str(row.get("result") or "대조 근거 없음")
-            issue_type = "일치" if result == "변경 없음(허용오차)" else "불일치"
-            severity = "낮음" if issue_type == "일치" else "중간"
+            comparison_band = str(row.get("comparison_band") or "")
+            issue_type = "일치" if comparison_band == "match" or result == "변경 없음(허용오차)" else ("연결 근거 없음" if result in {"변경 후 신규", "기준자료에만 존재"} else "불일치")
+            severity = "낮음" if comparison_band == "match" or issue_type == "일치" else ("중간" if comparison_band == "review" else "높음")
             items.append({
                 "id": f"comparison:{row['work_package']}:{row['item_key']}",
                 "project_id": project_id,
@@ -515,6 +615,9 @@ class PreprocessingReader:
                 "baseline_source_locator": " · ".join(row.get("baseline_source_rows") or []),
                 "changed_source_locator": " · ".join(row.get("changed_source_rows") or []),
                 "comparison_rate": row.get("difference_rate"),
+                "comparison_tolerance": row.get("comparison_tolerance"),
+                "comparison_tolerance_rate": row.get("comparison_tolerance_rate"),
+                "comparison_band": comparison_band or None,
                 "quantity_context": "내역서 기준·변경 원본행 합계",
                 "quantity_candidates": [],
                 "issue_type": issue_type,
@@ -527,8 +630,8 @@ class PreprocessingReader:
                 "recalculated_basis": "기준·변경 내역서 행 합계",
                 "difference": row.get("difference"),
                 "evidence": row.get("rule"),
-                "required_action": "변경 사유와 원본 행을 확인한 뒤 승인하세요.",
-                "rule_version": "comparison-v1-내역서기준·공종·표준키",
+                "required_action": "변경 후 신규·삭제 내역은 변경 사유와 원본 행을 확인한 뒤 단가·승인 검토로 넘기세요." if result in {"변경 후 신규", "기준자료에만 존재"} else "변경 사유와 원본 행을 확인한 뒤 승인하세요.",
+                "rule_version": "comparison-v2-내역서기준·공종·표준키·철골합계허용오차",
                 "locator_status": "RESOLVED" if row.get("source_rows") else "UNRESOLVED",
             })
         return items
@@ -599,10 +702,17 @@ class PreprocessingReader:
         return sorted(result, key=lambda item: (str(item["version"]), str(item["item_name"])))
 
     def _formula_quantity_missing_summary(self, quantities: list, source_by_id: dict) -> list[dict[str, object]]:
-        """Expose every formula-bearing source row whose original quantity is absent."""
+        """Recalculate every literal formula and keep missing rows traceable.
+
+        The earlier summary only listed formula rows without a cached quantity,
+        which made successful and failed rechecks look like the same state.
+        Grouping all formula rows by source now gives the UI one consistent
+        view of independently evaluable, matching, mismatching, and unresolved
+        rows without ever writing a guessed quantity back to the item.
+        """
         groups: dict[str, dict[str, object]] = {}
         for item in quantities:
-            if not item.formula_text or item.quantity is not None:
+            if not item.formula_text:
                 continue
             source = source_by_id.get(item.source_file_id)
             source_name = source.original_name if source else "원본 파일 미지정"
@@ -618,14 +728,27 @@ class PreprocessingReader:
                 "source_rows": [],
             })
             group["formula_cell_count"] += 1
-            group["not_evaluable_count"] += 1
+            calculated = _simple_formula_value(item.formula_text)
+            if calculated is None or item.quantity is None:
+                group["not_evaluable_count"] += 1
+            else:
+                group["independently_evaluable_count"] += 1
+                if abs(float(item.quantity) - calculated) <= _formula_rounding_tolerance(float(item.quantity)):
+                    group["match_count"] += 1
+                else:
+                    group["mismatch_count"] += 1
             if len(group["source_rows"]) < 10:
                 group["source_rows"].append(item.source_row_ref)
-        return [{
-            **group,
-            "result": "원본 수량 미추출",
-            "confidence": "중간",
-        } for group in groups.values()]
+        result: list[dict[str, object]] = []
+        for group in groups.values():
+            if group["not_evaluable_count"]:
+                status = "원본 수량 미추출·재검산 불가"
+            elif group["mismatch_count"]:
+                status = "산식 수량 차이 확인 필요"
+            else:
+                status = "단순 산식 재계산 일치"
+            result.append({**group, "result": status, "confidence": "중간"})
+        return result
 
     def raw_quantity_analysis(
         self,
@@ -664,6 +787,15 @@ class PreprocessingReader:
         if not runs:
             return None
         run = runs[0]
+        # Calculation cost is independent of the page size. Cache the full
+        # filtered result once, then slice it for each caller's requested
+        # limit so small probes can warm the same cache used by the UI.
+        cache_key = (project_id, run.id, source_set, issue_type, severity, query, discipline, work_package)
+        cached = _RAW_QUANTITY_CACHE.get(cache_key)
+        if cached and time.monotonic() - cached[0] < _RAW_QUANTITY_CACHE_TTL_SECONDS:
+            cached_payload = copy.deepcopy(cached[1])
+            cached_payload["items"] = cached_payload.get("items", [])[:max(1, min(limit, 5000))]
+            return cached_payload
         source_ids = json.loads(run.source_file_ids or "[]")
         if not source_ids:
             return None
@@ -712,6 +844,7 @@ class PreprocessingReader:
             row for row in rows
             if row.item_kind == "estimate"
             and is_office_record(row)
+            and not is_non_office_scope(row.item_name, row.specification, row.building_label, row.drawing_number)
             and not ((row.item_name or "").strip().startswith("[") and (row.item_name or "").strip().endswith("]"))
             and not _is_section_heading(row.item_name, {"unit": row.unit, "quantity": row.quantity, "formula": row.formula_text})
         ]
@@ -719,6 +852,7 @@ class PreprocessingReader:
             row for row in rows
             if row.item_kind == "quantity"
             and is_office_record(row)
+            and not is_non_office_scope(row.item_name, row.specification, row.building_label, row.drawing_number)
             # 동별집계표·산출근거집계표는 여러 동/공종을 합친 요약표다.
             # 사무동 내역 행의 산출근거로 직접 연결하면 타건물 물량이
             # 합산되므로 전용 공종별 산출서만 보조근거로 사용한다.
@@ -745,14 +879,16 @@ class PreprocessingReader:
         # ``무기질탄성도막방수(내부)`` -> ``무기질계탄성도막방수`` and
         # ``M2`` -> ``㎡``).  Use that map to construct a current-run group;
         # never import its historic quantities or approvals.
-        quantities_by_key_version: dict[tuple[str, str], list] = {}
+        quantities_by_key_version: dict[tuple[str, str, str], list] = {}
         standardized_by_id: dict[str, tuple[str, str, str, bool]] = {}
+        def inferred_work_package(item, source: SourceFile | None) -> str:
+            return infer_work_package(item.item_name, item.specification, source.original_name if source else None)
         for quantity_item in quantities:
             quantity_source = source_by_id.get(quantity_item.source_file_id)
             quantity_version = quantity_source.version_type if quantity_source else "기준"
             standardized = self._standardized_fields(quantity_item)
             standardized_by_id[quantity_item.id] = standardized
-            quantities_by_key_version.setdefault((standardized[0], quantity_version), []).append(quantity_item)
+            quantities_by_key_version.setdefault((standardized[0], quantity_version, inferred_work_package(quantity_item, quantity_source)), []).append(quantity_item)
 
         def source_label(source: SourceFile | None) -> tuple[str, str]:
             if source and source.version_type == "변경":
@@ -816,7 +952,8 @@ class PreprocessingReader:
             set_label, version = source_label(source)
             estimate_standard = self._standardized_fields(estimate)
             standardized_by_id[estimate.id] = estimate_standard
-            candidates = quantities_by_key_version.get((estimate_standard[0], source.version_type if source else "기준"), [])
+            estimate_work_package = inferred_work_package(estimate, source)
+            candidates = quantities_by_key_version.get((estimate_standard[0], source.version_type if source else "기준", estimate_work_package), [])
             matching = [
                 item for item in candidates
                 if (
@@ -916,7 +1053,7 @@ class PreprocessingReader:
                 issue, judgement, severity_value = comparison.issue_type, comparison.judgement, comparison.severity
                 action = comparison.required_action
             item_text = estimate.item_name
-            work_value = infer_work_package(item_text, estimate.specification, source.original_name if source else None)
+            work_value = estimate_work_package
             locator_parts = [
                 f"내역서 {source.original_name}" if source else None,
                 estimate.source_row_ref if estimate else None,
@@ -963,7 +1100,10 @@ class PreprocessingReader:
                         trace_candidates,
                         key=lambda item: abs(float(item.quantity or 0) - float(estimate.quantity)),
                     )
-                for candidate in ranked_candidates[:30]:
+                # Keep the list response compact. The inspector only needs a
+                # handful of representative rows; the evidence count and
+                # locator still record that more candidates exist.
+                for candidate in ranked_candidates[:5]:
                     candidate_source = source_by_id.get(candidate.source_file_id)
                     candidate_payload.append({
                         "id": candidate.id,
@@ -984,6 +1124,14 @@ class PreprocessingReader:
                 "discipline": discipline_value,
                 "work_package": work_value,
                 "item_key": estimate.item_code or estimate.normalized_name,
+                "comparison_key": "|".join(
+                    value for value in (
+                        estimate_standard[0],
+                        estimate_standard[1],
+                        estimate_standard[2],
+                    ) if value
+                ),
+                "comparison_unit": estimate_standard[2],
                 "item_text": item_text,
                 "source_file": source.original_name if source else None,
                 "sheet_or_drawing": (
@@ -1040,7 +1188,7 @@ class PreprocessingReader:
             for source in ("기준자료", "변경자료", "기준·변경 대조")
         }
         work_package_counts["전체"] = dict(Counter(item["work_package"] or "미분류·원천 확인 필요" for item in result))
-        return {
+        payload = {
             "project_id": project_id,
             "scope": "광양5 사무동 내역서·수량산출서 오류 분석",
             "generated_from": f"raw_upload preprocessing run {run.id} ({run.parser_version})",
@@ -1048,13 +1196,17 @@ class PreprocessingReader:
             "approval_queue_total": len(estimates),
             "summary": dict(summary),
             "work_package_counts": work_package_counts,
-            "items": result[:max(1, min(limit, 5000))],
+            "items": result,
             "recheck_summary": self._formula_quantity_missing_summary(quantities, source_by_id),
             "steel_relation_summary": self._steel_relation_summary(quantities, source_by_id),
             "steel_coating_formula_summary": self._steel_coating_formula_summary(quantities, source_by_id),
-            "material_construction_relation_summary": self._material_construction_relation_summary(quantities, source_by_id),
+            "material_construction_relation_summary": self._material_construction_relation_summary(estimates, quantities, source_by_id),
             "baseline_changed_comparison": baseline_changed_comparison,
         }
+        _RAW_QUANTITY_CACHE[cache_key] = (time.monotonic(), payload)
+        response_payload = copy.deepcopy(payload)
+        response_payload["items"] = response_payload.get("items", [])[:max(1, min(limit, 5000))]
+        return response_payload
 
     def quantity_analysis(self, limit: int = 1000, source_set: str | None = None, issue_type: str | None = None, severity: str | None = None, query: str | None = None, discipline: str | None = None, work_package: str | None = None) -> dict:
         """전처리 산출물의 공사부서 수량 검토 대기열을 읽기 전용으로 정규화한다.

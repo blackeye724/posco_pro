@@ -1,0 +1,4 @@
+original_item,standard_item,estimate_spec,standard_unit,building,estimate_unit_price,dataset_use,provenance,restriction
+흡음패널,흡음패널,PET 25T,m²,생산동,65000,신규내역 비교 참고,demo_price_references.csv:row-2,승인 전 후보값·사무동 확정값으로 자동 적용 금지
+철골보,철골보,H-400x200,TON,생산동,2150000,철골공사 단가 참고,demo_price_references.csv:row-3,승인 전 후보값·사무동 확정값으로 자동 적용 금지
+무기질탄성도막방수(내부),무기질탄성도막방수(내부),2회 도포,m²,보안동,18000,방수공사 단가 참고,demo_price_references.csv:row-4,승인 전 후보값·사무동 확정값으로 자동 적용 금지

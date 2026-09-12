@@ -3,12 +3,17 @@
 !.env.example
 node_modules/
 .next/
+.next-dev/
 .venv/
 mvp-test.db
 __pycache__/
 .pytest_cache/
 *.py[cod]
 *.tsbuildinfo
+backend/uvicorn-*.log
+frontend/next-dev*.log
+backend-dev*.log
+frontend/frontend-dev*.log
 
 # Local runtime data and uploaded source files stay outside source snapshots.
 uploads/

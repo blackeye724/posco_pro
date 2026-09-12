@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     price_api_service_name: str = "PriceInfoService"
     official_price_csv: Path | None = None
     standard_market_price_csv: Path | None = None
+    # 승인된 타건물 참고단가 CSV. 비어 있으면 기존 전처리 결과 경로를 사용한다.
+    price_reference_csv: Path | None = None
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

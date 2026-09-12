@@ -28,11 +28,13 @@ from ..database import (
     PreprocessingArtifact,
     PreprocessingRecord,
     PreprocessingRun,
+    ProcurementPriceResult,
     Project,
     ReviewWarning,
     SourceFile,
     StandardizedItem,
 )
+from .quantity_rule_engine import canonical_key as _comparison_key, canonical_name as _comparison_name, canonical_unit as _comparison_unit, spec_compatible as _comparison_spec_compatible
 
 
 HEADER_ALIASES: dict[str, tuple[str, ...]] = {
@@ -59,6 +61,31 @@ HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "floor": ("층", "floor", "층명", "층범위", "층 범위"),
     "space": ("공간", "실", "space", "실명", "부위", "부위명", "공간명"),
 }
+
+# Raw estimate workbooks can contain reference sections for adjacent buildings
+# and plant areas.  Those rows may still inherit the workbook's ``사무동``
+# building label, so the textual scope guard is intentionally kept alongside
+# the parser and reused by every changed-item promotion path.
+NON_OFFICE_SCOPE_TOKENS = (
+    "보안동",
+    "분석동",
+    "재활용창고",
+    "특고압동",
+    "폐수처리동",
+    "폐기물처리동",
+    "수처리동",
+    "덕트하우스",
+    "계근대",
+    "PIPE RACK",
+    "한라IMS",
+    "분리수거장",
+)
+
+
+def is_non_office_scope(*values: object) -> bool:
+    """Return whether row text explicitly belongs to a non-office area."""
+    text = " ".join(str(value or "") for value in values).casefold()
+    return any(token.casefold() in text for token in NON_OFFICE_SCOPE_TOKENS)
 
 
 def _clean_key(value: object) -> str:
@@ -89,16 +116,19 @@ def _normalized_name(value: str | None) -> str | None:
 
 
 def _is_section_heading(item_name: object, mapped: dict[str, object]) -> bool:
-    """Return ``True`` only for a numbered work-package heading.
+    """Return ``True`` for a numbered work-package or sub-section heading.
 
-    Estimate workbooks put labels such as ``0306. 타일공사`` directly above
-    their item rows.  Those labels can share the item/specification columns
-    with the data table, so they must not become a review row merely because
-    the row also contains a building label.  The rule stays deliberately
-    narrow: a real item with a unit, formula, or numeric quantity is retained.
+    Estimate workbooks put labels such as ``0306. 타일공사`` and
+    ``0318. 골재대`` directly above their item rows.  Those labels can share
+    the item/specification columns with the data table, so they must not
+    become review rows merely because the row also contains a building label.
+    A real item with a unit, formula, or non-zero numeric quantity is retained.
     """
     name = str(item_name or "").strip()
-    if not re.fullmatch(r"\d{2,4}\s*[.)]\s*.+공사", name):
+    # Some sheets use four/five digit section numbers and omit the dot
+    # entirely (``0413 골재대`` / ``12010. 운반비``).  The quantity/unit
+    # guard below keeps real item rows safe while excluding these labels.
+    if not re.fullmatch(r"\d{2,6}\s*(?:[.)]\s*|\s+).+", name):
         return False
     if _text(mapped.get("unit")) or _text(mapped.get("formula")):
         return False
@@ -131,10 +161,31 @@ def _input_hash(files: list[SourceFile]) -> str:
 class RawPreprocessor:
     # Bump whenever workbook context extraction changes so an identical upload
     # is reprocessed instead of reusing a stale snapshot.
-    parser_version = "raw-v9"
+    # Bump when row inclusion/classification semantics change so an existing
+    # completed run cannot silently mask the new preprocessing rules.
+    parser_version = "raw-v10"
 
     def __init__(self, upload_root: Path | None = None):
         self.upload_root = upload_root or get_settings().upload_dir
+        self._office_alias_catalog: list[dict[str, object]] | None = None
+
+    def _office_aliases(self) -> list[dict[str, object]]:
+        """Load the audited 사무동 vocabulary map for raw-upload matching."""
+        if self._office_alias_catalog is not None:
+            return self._office_alias_catalog
+        path = get_settings().preprocessing_dir / "14_사무동_현재검토_표준화매핑.csv"
+        if not path.is_file():
+            self._office_alias_catalog = []
+            return self._office_alias_catalog
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as source:
+                self._office_alias_catalog = [
+                    row for row in csv.DictReader(source)
+                    if row.get("in_scope") == "Y" and str(row.get("building") or "").strip() == "사무동"
+                ]
+        except (OSError, csv.Error):
+            self._office_alias_catalog = []
+        return self._office_alias_catalog
 
     @staticmethod
     def _xlsx_rows(path: Path) -> list[tuple[str, dict[str, str]]]:
@@ -429,6 +480,95 @@ class RawPreprocessor:
             return "drawing"
         return "source"
 
+    @staticmethod
+    def _drawing_number(source: SourceFile) -> str | None:
+        """Resolve a drawing number from metadata first, then a safe filename hint."""
+        explicit = _text(getattr(source, "drawing_number", None))
+        if explicit:
+            return explicit
+        text = " ".join(str(value or "") for value in (getattr(source, "original_name", None), getattr(source, "file_path", None), getattr(source, "sheet_name", None)))
+        # Project drawing names commonly contain ``DWG-101``, ``A-101`` or
+        # ``S_201``.  Require a drawing prefix so dates and revision numbers
+        # are not accidentally promoted to sheet identifiers.
+        match = re.search(r"(?:dwg|도면|[asmefp]-?)\s*[-_ ]?\s*(\d{3,4})(?!\d)", text, flags=re.IGNORECASE)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _drawing_discipline(source: SourceFile) -> str | None:
+        """Infer a conservative discipline hint for same-number sheets."""
+        text = " ".join(str(value or "") for value in (getattr(source, "original_name", None), getattr(source, "file_path", None), getattr(source, "sheet_name", None)))
+        for token, label in (("건축", "건축"), ("구조", "구조"), ("토목", "토목"), ("기계", "기계"), ("전기", "전기"), ("소방", "소방")):
+            if token in text:
+                return label
+        return None
+
+    @staticmethod
+    def _quantity_field_match(estimate: StandardizedItem, quantity: StandardizedItem, aliases: list[dict[str, object]] | None = None) -> tuple[bool, set[str]]:
+        """Apply the same canonical name/spec/unit rules to raw uploads.
+
+        Raw preprocessing must not use stricter string equality than the
+        review reader.  Harmless punctuation/unit variants and compatible
+        specification token order are accepted; genuine field differences are
+        returned so the UI can explain why a candidate was withheld.
+        """
+        estimate_name = _comparison_name(estimate.normalized_name or estimate.item_name, aliases, specification=estimate.specification, unit=estimate.unit)
+        quantity_name = _comparison_name(quantity.normalized_name or quantity.item_name, aliases, specification=quantity.specification, unit=quantity.unit)
+        if not estimate_name or estimate_name != quantity_name:
+            return False, set()
+        mismatch_fields: set[str] = set()
+        estimate_unit = _comparison_unit(estimate.unit)
+        quantity_unit = _comparison_unit(quantity.unit)
+        if estimate_unit and quantity_unit and estimate_unit != quantity_unit:
+            mismatch_fields.add("단위")
+        if estimate.specification and quantity.specification and not _comparison_spec_compatible(
+            estimate.specification,
+            quantity.specification,
+            aliases,
+            left_item=estimate.normalized_name or estimate.item_name,
+            right_item=quantity.normalized_name or quantity.item_name,
+            left_unit=estimate.unit,
+            right_unit=quantity.unit,
+        ):
+            mismatch_fields.add("규격")
+        return not mismatch_fields, mismatch_fields
+
+    @staticmethod
+    def _match_baseline_drawing(changed_file: SourceFile, baselines: list[SourceFile]) -> SourceFile | None:
+        """Return the safest 기준 도면 match for a 변경 도면.
+
+        도면번호만으로 짝을 지으면 건축·구조처럼 같은 번호를 재사용하는
+        공종이 서로 연결될 수 있다. 따라서 건물과 공종(작업 패키지)이
+        명시된 경우에는 두 값이 모두 같은 후보만 허용하고, 메타데이터가
+        비어 있는 레거시 파일은 도면번호 기준의 보수적 후보로만 남긴다.
+        """
+        changed_number = RawPreprocessor._drawing_number(changed_file)
+        if not changed_number:
+            return None
+        number = changed_number.strip().casefold()
+        candidates = [
+            source for source in baselines
+            if (RawPreprocessor._drawing_number(source) or "").strip().casefold() == number
+        ]
+        if not candidates:
+            return None
+
+        if changed_file.building_id:
+            scoped = [source for source in candidates if getattr(source, "building_id", None) in {None, changed_file.building_id}]
+            candidates = scoped or []
+        if changed_file.work_package_id:
+            scoped = [source for source in candidates if getattr(source, "work_package_id", None) in {None, changed_file.work_package_id}]
+            candidates = scoped or []
+        changed_discipline = RawPreprocessor._drawing_discipline(changed_file)
+        if changed_discipline:
+            scoped = [source for source in candidates if RawPreprocessor._drawing_discipline(source) in {None, changed_discipline}]
+            candidates = scoped or []
+        if not candidates:
+            return None
+
+        # 같은 번호의 기준본이 여러 개면 메타데이터가 더 완전한 파일을 우선한다.
+        candidates.sort(key=lambda source: (bool(getattr(source, "building_id", None)), bool(getattr(source, "work_package_id", None)), source.id), reverse=True)
+        return candidates[0]
+
     def create_run(self, db: Session, project: Project, source_files: list[SourceFile], requested_by: str | None, source_kind: str = "raw_upload") -> PreprocessingRun:
         if not source_files:
             raise ValueError("전처리할 원본 파일이 없습니다.")
@@ -454,7 +594,18 @@ class RawPreprocessor:
             if office_building_id:
                 sources = [
                     source for source in sources
-                    if self._kind(source) not in {"estimate", "quantity"} or source.building_id == office_building_id
+                    if (
+                        self._kind(source) not in {"estimate", "quantity", "drawing"}
+                        or (
+                            self._kind(source) in {"estimate", "quantity"}
+                            and source.building_id == office_building_id
+                        )
+                        or (
+                            self._kind(source) == "drawing"
+                            and (source.building_id in {None, office_building_id})
+                            and not is_non_office_scope(source.original_name, source.file_path, source.drawing_number)
+                        )
+                    )
                 ]
         items_by_kind: dict[str, list[StandardizedItem]] = {"estimate": [], "quantity": [], "drawing": []}
         processed = 0
@@ -462,6 +613,7 @@ class RawPreprocessor:
         pending_evidence: list[EvidenceReference] = []
         for source in sources:
             kind = self._kind(source)
+            source_drawing_number = self._drawing_number(source) if kind == "drawing" else None
             for locator, raw in self._rows(source):
                 mapped = self._map_row(raw)
                 if kind in {"estimate", "quantity"} and not mapped.get("item_name"):
@@ -472,7 +624,7 @@ class RawPreprocessor:
                     and mapped.get("quantity") is None
                 )
                 item_id = _safe_id("ITEM", f"{run.id}|{source.id}|{locator}")
-                item = StandardizedItem(id=item_id, project_id=run.project_id, source_file_id=source.id, item_kind=kind, item_code=_text(mapped.get("item_code")), item_name=mapped.get("item_name") or source.original_name, normalized_name=mapped.get("normalized_name") or _normalized_name(source.original_name), specification=mapped.get("specification"), unit=mapped.get("unit"), quantity=mapped.get("quantity"), unit_price=mapped.get("unit_price"), total_amount=mapped.get("amount"), formula_text=mapped.get("formula"), formula_result=mapped.get("quantity"), building_label=_text(mapped.get("building")), floor_label=_text(mapped.get("floor")), space_label=_text(mapped.get("space")), drawing_number=_text(mapped.get("drawing_number")) or source.drawing_number, source_row_ref=locator, source_cell_ref=locator, notes=json.dumps({"source_kind": run.source_kind, "parser_version": run.parser_version, "run_id": run.id, "quantity_ton": mapped.get("quantity_ton"), "material_class": mapped.get("material_class"), "member_class": mapped.get("member_class")}, ensure_ascii=False))
+                item = StandardizedItem(id=item_id, project_id=run.project_id, source_file_id=source.id, item_kind=kind, item_code=_text(mapped.get("item_code")), item_name=mapped.get("item_name") or source.original_name, normalized_name=mapped.get("normalized_name") or _normalized_name(source.original_name), specification=mapped.get("specification"), unit=mapped.get("unit"), quantity=mapped.get("quantity"), unit_price=mapped.get("unit_price"), total_amount=mapped.get("amount"), formula_text=mapped.get("formula"), formula_result=mapped.get("quantity"), building_label=_text(mapped.get("building")), floor_label=_text(mapped.get("floor")), space_label=_text(mapped.get("space")), drawing_number=_text(mapped.get("drawing_number")) or source_drawing_number, source_row_ref=locator, source_cell_ref=locator, notes=json.dumps({"source_kind": run.source_kind, "parser_version": run.parser_version, "run_id": run.id, "quantity_ton": mapped.get("quantity_ton"), "material_class": mapped.get("material_class"), "member_class": mapped.get("member_class")}, ensure_ascii=False))
                 db.merge(item)
                 # Warning rows reference this immutable source snapshot. When
                 # a formula has no cached quantity, persist the item before
@@ -525,18 +677,67 @@ class RawPreprocessor:
                         db.add(ReviewWarning(id=warning_id, project_id=run.project_id, standardized_item_id=item.id, warning_type="amount_formula_mismatch", severity="높음", title="수량×단가와 금액 불일치", detail=f"재계산 금액 {expected:,.2f} / 원본 금액 {amount:,.2f}", expected_value=str(expected), actual_value=str(amount), status="검토 대기", rule_code="RAW_AMOUNT_RECHECK"))
                         pending_evidence.append(EvidenceReference(id=_safe_id("EVID", warning_id), project_id=run.project_id, warning_id=warning_id, source_file_id=source.id, evidence_type="raw_formula", file_path=source.file_path, row_ref=locator, sheet_name=source.sheet_name, evidence_note="원본 수량·단가·금액 재계산", extraction_confidence="중간"))
         db.flush()
+        # 변경자료에만 존재하는 사무동 내역서는 구매부서 단가 검토
+        # 후보를 전처리 실행 시점에 생성한다. 수량·단가는 승인 전 값으로
+        # 남기고, 타건물 참고단가와 자동 연결하지 않는다.
+        baseline_keys = {
+            (_comparison_name(item.normalized_name or item.item_name, self._office_aliases(), specification=item.specification, unit=item.unit), _comparison_key(item.specification), _comparison_unit(item.unit))
+            for item in items_by_kind["estimate"]
+            if (db.get(SourceFile, item.source_file_id) and db.get(SourceFile, item.source_file_id).version_type == "기준")
+        }
+        for changed_item in items_by_kind["estimate"]:
+            changed_source = db.get(SourceFile, changed_item.source_file_id)
+            if not changed_source or changed_source.version_type != "변경":
+                continue
+            changed_text = " ".join(str(value or "") for value in (changed_item.item_name, changed_item.specification, changed_item.building_label, changed_item.drawing_number))
+            if is_non_office_scope(changed_item.item_name, changed_item.specification, changed_item.building_label, changed_item.drawing_number):
+                continue
+            # A zero/negative changed quantity represents deletion or a
+            # non-item subtotal, not a new purchasable line requiring a unit
+            # price review.  Keep it in the quantity/change audit instead.
+            if changed_item.quantity is None or changed_item.quantity <= 0:
+                continue
+            changed_key = (_comparison_name(changed_item.normalized_name or changed_item.item_name, self._office_aliases(), specification=changed_item.specification, unit=changed_item.unit), _comparison_key(changed_item.specification), _comparison_unit(changed_item.unit))
+            if not changed_key[0] or changed_key in baseline_keys:
+                continue
+            # The source row is the business identity of a candidate.  Do not
+            # include the preprocessing run id, otherwise rerunning the same
+            # source set creates duplicate price-review rows.
+            candidate_id = f"NEW-CMP-{hashlib.sha256(f'{run.project_id}|{changed_item.source_file_id}|{changed_item.source_row_ref or changed_item.id}'.encode('utf-8')).hexdigest()[:16]}"
+            db.merge(ProcurementPriceResult(
+                id=_safe_id("PRICE", candidate_id),
+                project_id=run.project_id,
+                standardized_item_id=changed_item.id,
+                candidate_id=candidate_id,
+                standard_key=changed_item.item_code or changed_item.normalized_name,
+                item_name=changed_item.item_name,
+                specification=changed_item.specification,
+                unit=changed_item.unit,
+                lookup_status="변경 후 신규 · 수량 승인 전 단가 검토 대기",
+                service_name="기준·변경 대조 전처리",
+                query_text=changed_item.item_name or changed_item.normalized_name,
+                source_file_id=changed_source.id,
+                source_set="변경자료 신규내역",
+                work_package="사무동 내역 신규",
+                changed_quantity=str(changed_item.quantity) if changed_item.quantity is not None else None,
+                evidence=f"변경자료 내역서 {changed_source.original_name} · {changed_item.source_row_ref or '원본 행'} · 기준자료 표준키 미발견",
+            ))
+        db.flush()
         # 수량산출서와 내역서의 연결 후보를 만든다. 연결이 없을 때만 일반 경고를 만들며,
         # 도면 연결 미확인만으로 불가/높음 판정을 만들지 않는다.
         estimates = items_by_kind["estimate"]
+        office_aliases = self._office_aliases()
         for quantity_item in items_by_kind["quantity"]:
-            name_matches = [item for item in estimates if quantity_item.normalized_name and item.normalized_name == quantity_item.normalized_name]
-            matches = [item for item in name_matches if (not quantity_item.unit or not item.unit or quantity_item.unit == item.unit)]
+            field_results = [
+                (item, *self._quantity_field_match(item, quantity_item, office_aliases))
+                for item in estimates
+            ]
+            name_matches = [item for item, _, _ in field_results if _comparison_name(item.normalized_name or item.item_name, office_aliases, specification=item.specification, unit=item.unit) == _comparison_name(quantity_item.normalized_name or quantity_item.item_name, office_aliases, specification=quantity_item.specification, unit=quantity_item.unit)]
+            matches = [item for item, compatible, _ in field_results if compatible]
             mismatch_fields: set[str] = set()
-            for estimate in name_matches:
-                if quantity_item.unit and estimate.unit and quantity_item.unit != estimate.unit:
-                    mismatch_fields.add("단위")
-                if quantity_item.specification and estimate.specification and _normalized_name(quantity_item.specification) != _normalized_name(estimate.specification):
-                    mismatch_fields.add("규격")
+            for item, _, fields in field_results:
+                if item in name_matches:
+                    mismatch_fields.update(fields)
             if mismatch_fields:
                 warning_id = _safe_id("WARN", f"{run.id}|field-mismatch|{quantity_item.id}|{'|'.join(sorted(mismatch_fields))}")
                 estimate_refs = ", ".join(f"{item.source_row_ref or item.id}" for item in name_matches[:3])
@@ -563,10 +764,10 @@ class RawPreprocessor:
         base = [source for source in drawing_sources if source.version_type == "기준"]
         changed = [source for source in drawing_sources if source.version_type == "변경"]
         for changed_file in changed:
-            candidates = [source for source in base if changed_file.drawing_number and source.drawing_number == changed_file.drawing_number]
-            baseline = candidates[0] if candidates else None
-            drawing_id = _safe_id("DRAW", f"{run.id}|{baseline.id if baseline else 'none'}|{changed_file.id}")
-            db.merge(DrawingChangeCandidate(id=drawing_id, project_id=run.project_id, before_file_id=baseline.id if baseline else None, after_file_id=changed_file.id, drawing_number=changed_file.drawing_number, candidate_text="기준·변경 도면 변경 후보", change_type="전후 비교 후보", location_ref=changed_file.sheet_name, confidence="중간" if baseline else "낮음", status="연결 후보", baseline_file=baseline.file_path if baseline else None, changed_file=changed_file.file_path, baseline_revision=baseline.revision if baseline else None, changed_revision=changed_file.revision, sheet_number=changed_file.sheet_name))
+            baseline = self._match_baseline_drawing(changed_file, base)
+            drawing_number = self._drawing_number(changed_file)
+            drawing_id = _safe_id("DRAW", f"{run.project_id}|{baseline.id if baseline else 'none'}|{changed_file.id}|{drawing_number or 'unknown'}")
+            db.merge(DrawingChangeCandidate(id=drawing_id, project_id=run.project_id, before_file_id=baseline.id if baseline else None, after_file_id=changed_file.id, discipline=self._drawing_discipline(changed_file), drawing_number=drawing_number, candidate_text="기준·변경 도면 변경 후보", change_type="전후 비교 후보", location_ref=changed_file.sheet_name, confidence="중간" if baseline else "낮음", status="연결 후보", baseline_file=baseline.file_path if baseline else None, changed_file=changed_file.file_path, baseline_revision=baseline.revision if baseline else None, changed_revision=changed_file.revision, sheet_number=changed_file.sheet_name))
         artifact_dir = self.upload_root / run.project_id / "preprocessing"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact_path = artifact_dir / f"{run.id}.json"

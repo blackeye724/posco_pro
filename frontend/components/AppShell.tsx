@@ -8,8 +8,7 @@ import { currentUserId, PROJECT_ID, USER_ID } from "./api";
 type NavIconName = "dashboard" | "review" | "upload" | "drawings" | "quantities" | "prices" | "approvals" | "history" | "chat";
 type NavItem = [string, string, NavIconName];
 const navigationGroups: { label: string; items: NavItem[] }[] = [
-  { label: "현황", items: [["/", "현황 대시보드", "dashboard"]] },
-  { label: "검토 진행", items: [["/review", "통합 검토 큐", "review"], ["/quantities", "최초 자료 검토", "quantities"], ["/drawings", "설계변경 검토", "drawings"], ["/prices", "신규내역 단가 검토", "prices"]] },
+  { label: "검토", items: [["/", "검토 홈", "dashboard"], ["/review", "확인 요청함", "review"], ["/quantities", "최초 자료 검토", "quantities"], ["/drawings", "설계변경 검토", "drawings"], ["/prices", "신규내역 단가 검토", "prices"]] },
   { label: "자료·승인", items: [["/upload", "자료 업로드·회차", "upload"], ["/approvals", "승인 대기열", "approvals"], ["/history", "검토 이력", "history"]] },
   { label: "도움", items: [["/chat", "검토 챗봇", "chat"]] },
 ];
@@ -35,12 +34,19 @@ export function AppShell({ children, eyebrow, title }: { children: React.ReactNo
   const [displayName, setDisplayName] = useState("");
   const [department, setDepartment] = useState("");
   const [pinned, setPinned] = useState(false);
+  const [dataScope, setDataScope] = useState<string | null>(null);
   useEffect(() => {
     setUserId(currentUserId());
     setDisplayName(window.localStorage.getItem("mvp_display_name") || "");
     setDepartment(window.localStorage.getItem("mvp_department") || "");
     setPinned(window.localStorage.getItem("mvp_sidebar_pinned") === "true");
+    setDataScope(new URLSearchParams(window.location.search).get("dataScope"));
   }, []);
+  function withDataScope(path: string) {
+    if (!dataScope) return path;
+    const separator = path.includes("?") ? "&" : "?";
+    return `${path}${separator}dataScope=${encodeURIComponent(dataScope)}`;
+  }
   function togglePinned() {
     setPinned(current => {
       const next = !current;
@@ -60,7 +66,7 @@ export function AppShell({ children, eyebrow, title }: { children: React.ReactNo
       <div className="brand"><span className="brand-mark">CR</span><div className="brand-copy"><strong>Cost Review</strong><small>공사비 적정성 검토</small></div><button type="button" className="sidebar-toggle" onClick={togglePinned} aria-label={pinned ? "메뉴 고정 해제" : "메뉴 펼쳐 고정"} aria-pressed={pinned} title={pinned ? "메뉴 고정 해제" : "메뉴 펼쳐 고정"}><span aria-hidden="true">{pinned ? "‹" : "›"}</span></button></div>
       <div className="project-context"><span>검토 대상 프로젝트</span><strong>광양5 사무동</strong><small>{PROJECT_ID}</small></div>
       <nav aria-label="검토 화면">
-        {navigationGroups.map(group => <div className="nav-group" key={group.label}><span className="nav-group-label">{group.label}</span>{group.items.map(([href, label, icon]) => <Link key={href} href={href} title={label} className={pathname === href ? "nav-link active" : "nav-link"}><span className="nav-icon"><NavIcon name={icon} /></span><span className="nav-label">{label}</span></Link>)}</div>)}
+        {navigationGroups.map(group => <div className="nav-group" key={group.label}><span className="nav-group-label">{group.label}</span>{group.items.map(([href, label, icon]) => <Link key={href} href={withDataScope(href)} title={label} className={pathname === href ? "nav-link active" : "nav-link"}><span className="nav-icon"><NavIcon name={icon} /></span><span className="nav-label">{label}</span></Link>)}</div>)}
       </nav>
       <div className="sidebar-note"><strong>자동 확정 금지</strong><p>수량·금액·단가는 담당 부서 승인 전까지 검토 후보로만 표시됩니다.</p></div>
     </aside>
@@ -71,8 +77,17 @@ export function AppShell({ children, eyebrow, title }: { children: React.ReactNo
 export function PageMessage({ children, tone = "info" }: { children: React.ReactNode; tone?: "info" | "danger" | "warning" }) { return <div className={`page-message ${tone}`} role="status">{children}</div>; }
 
 export function WorkflowStepper({ current }: { current: "initial" | "change" | "price" }) {
+  const [dataScope, setDataScope] = useState<string | null>(null);
+  useEffect(() => {
+    setDataScope(new URLSearchParams(window.location.search).get("dataScope"));
+  }, []);
+  const withDataScope = (path: string) => {
+    if (!dataScope) return path;
+    const separator = path.includes("?") ? "&" : "?";
+    return `${path}${separator}dataScope=${encodeURIComponent(dataScope)}`;
+  };
   const steps = [{ key: "initial", label: "01 최초 자료", href: "/quantities?sourceSet=기준자료" }, { key: "change", label: "02 설계변경", href: "/drawings" }, { key: "price", label: "03 신규내역 단가", href: "/prices?sourceSet=변경자료" }];
-  return <nav className="workflow-stepper" aria-label="핵심 검토 단계">{steps.map(step => <a key={step.key} href={step.href} className={step.key === current ? "active" : ""} aria-current={step.key === current ? "step" : undefined}>{step.label}</a>)}</nav>;
+  return <nav className="workflow-stepper" aria-label="핵심 검토 단계">{steps.map(step => <a key={step.key} href={withDataScope(step.href)} className={step.key === current ? "active" : ""} aria-current={step.key === current ? "step" : undefined}>{step.label}</a>)}</nav>;
 }
 
 function displayFileName(path?: string) {

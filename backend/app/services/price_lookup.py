@@ -89,8 +89,11 @@ class PriceLookupService:
             price, reference = self._lookup_csv(record, path, source_kind)
             if reference:
                 return price, reference
-        path = self.settings.preprocessing_dir / "15_타건물_기계약단가_참고.csv"
-        if not path.exists():
+        configured = self.settings.price_reference_csv
+        # An empty/missing optional setting must not disable the historical
+        # preprocessing fallback (Pydantic parses an empty Path as ``.``).
+        path = configured if configured and configured.is_file() else (self.settings.preprocessing_dir / "15_타건물_기계약단가_참고.csv")
+        if not path.is_file():
             return None, None
         return self._lookup_csv(record, path, "동일 프로젝트·타건물 참고")
 
