@@ -2,8 +2,8 @@ from pathlib import Path
 import zipfile
 from types import SimpleNamespace
 
-from app.services.raw_preprocessor import RawPreprocessor, _is_section_heading
-from app.services.preprocessing_reader import PreprocessingReader, _canonical_unit, _formula_rounding_tolerance, _simple_formula_value, _spec_compatible, infer_work_package
+from app.services.raw_preprocessor import RawPreprocessor, _is_section_heading, is_non_office_scope
+from app.services.preprocessing_reader import PreprocessingReader, _canonical_unit, _formula_rounding_tolerance, _simple_formula_value, _spec_compatible, classification_status, infer_work_package
 from app.services.quantity_rule_engine import canonical_name, canonical_spec, classify_material_relation, compare_quantity, compare_related_totals, compare_version_quantities, spec_compatible
 
 
@@ -14,6 +14,16 @@ def test_map_row_normalizes_korean_headers_and_numbers():
     assert row["quantity"] == 1250.5
     assert row["unit_price"] == 100000
     assert row["amount"] == 125050000
+
+
+def test_structural_member_callouts_are_classified_as_steel():
+    assert infer_work_package("#SB27M") == "철골공사"
+    assert infer_work_package("BASE PL-180x100x12t") == "철골공사"
+
+
+def test_non_office_scope_guard_blocks_reference_buildings_from_linkage():
+    assert is_non_office_scope("콘크리트", "보안동", "사무동") is True
+    assert is_non_office_scope("콘크리트", "사무동", "건축공사") is False
 
 
 def test_map_row_preserves_quantity_context_aliases():
@@ -148,7 +158,34 @@ def test_window_schedule_codes_are_classified_without_promoting_generic_al_items
     assert infer_work_package("AW01[150mm AL 단열바]") == "창호공사"
     assert infer_work_package("AW_E03[2.사무동]") == "창호공사"
     assert infer_work_package("AWE01[150mm PVC,FIX]") == "창호공사"
+    assert infer_work_package("FSD01[2.사무동]") == "창호공사"
+    assert infer_work_package("SSD_E1[1.5T SST HL]") == "창호공사"
+    assert infer_work_package("SD_E2[2.사무동]") == "창호공사"
     assert infer_work_package("AL몰딩설치") == "금속공사"
+    assert infer_work_package("GALV.GUTTER 설치") == "홈통공사"
+    assert infer_work_package("강관동바리 설치 및 해체") == "가설공사"
+    assert infer_work_package("그라스울단열설치/외벽") == "단열공사"
+    assert infer_work_package("강섬유") == "철근콘크리트공사"
+    assert infer_work_package("유용토 운반") == "토공사"
+    assert infer_work_package("철강채널") == "철골공사"
+    assert infer_work_package("계단논슬립") == "금속공사"
+    assert infer_work_package("천정점검구") == "수장공사"
+    assert infer_work_package("아연도골강판 설치/외벽") == "패널공사"
+    assert infer_work_package("FST01[2.사무동]") == "창호공사"
+    assert infer_work_package("PD01[2.사무동]") == "창호공사"
+    assert infer_work_package("PW01[150mm PVC,FIX]") == "창호공사"
+    assert infer_work_package("관통볼트") == "철골공사"
+    assert infer_work_package("그라스크로스 설치") == "방수공사"
+    assert infer_work_package("앵글코너가드/집수정") == "금속공사"
+    assert infer_work_package("기존 보온재 철거") == "단열공사"
+    assert infer_work_package("ELEV내부 작업발판") == "승강기공사"
+
+
+def test_unclassified_items_expose_actionable_classification_status():
+    assert classification_status("미분류·원천 확인 필요", "PILE 소운반", "pile소운반") == "원천 파일 확인 필요"
+    assert classification_status("미분류·원천 확인 필요", "DYNAMIC LOAD TEST") == "공종 분류 불가"
+    assert classification_status("철골공사", "DYNAMIC LOAD TEST") is None
+    assert infer_work_package("화장실점자안내판") == "금속공사"
     assert infer_work_package("DOOR CLOSER") == "창호공사"
     assert infer_work_package("CT형강") == "철골공사"
     assert infer_work_package("DRY WALL(C-100)") == "수장공사"
@@ -209,6 +246,46 @@ def test_drawing_candidates_stay_separate_from_quantity_queue(tmp_path: Path):
     assert rows[0]["baseline_revision"] == "Rev.0"
     assert rows[0]["changed_revision"] == "Rev.F"
     assert rows[0]["status"] == "근거 확인 대기"
+
+
+def test_detailed_drawing_candidates_keep_masonry_location_and_source_link(tmp_path: Path):
+    (tmp_path / "60_건축_DWG_객체비교").mkdir()
+    (tmp_path / "06_도면_전후매핑후보.csv").write_text(
+        "baseline_file,changed_file,discipline,next_action,pair_status,sheet_number\n"
+        "기준/1A-111.pdf,변경/1A-111.pdf,1A,PDF 위치 확인,전후 비교 후보,111\n",
+        encoding="utf-8-sig",
+    )
+    (tmp_path / "60_건축_DWG_객체비교" / "65_사무동_건축도면_자동변경후보_작업대기열.csv").write_text(
+        "queue_id,drawing_sheet,change_type,candidate_text,layer,x,y,candidate_type,confidence,automatic_next_action\n"
+        "ARC-111-1,1A-111,추가 후보,시멘트 벽돌 / 비노출 우레탄 방수 (H=1800),TEXT,2201,1299,건축 마감 변경 후보,중간,변경 내역서 검색\n",
+        encoding="utf-8-sig",
+    )
+    (tmp_path / "60_건축_DWG_객체비교" / "67_사무동_건축변경_원천행_자동연결요약.csv").write_text(
+        "queue_id,result,source_candidate_count,source_candidate_samples,automatic_next_action,confidence\n"
+        "ARC-111-1,원천 행 복수 연결 후보 - 자동 수량 합산 금지,2,변경내역서:행 20 | 산출서:행 55,원천 행 문맥 확인,중간\n",
+        encoding="utf-8-sig",
+    )
+
+    rows = PreprocessingReader(tmp_path).drawing_candidates(limit=10)
+    detailed = next(row for row in rows if row["id"].startswith("DRAW-DETAIL"))
+
+    assert detailed["work_package"] == "조적공사 · 방수공사"
+    assert detailed["location_ref"].startswith("시트 1A-111 · 레이어 TEXT · 좌표 2201, 1299")
+    assert detailed["text_role"] == "자재·규격 표기"
+    assert detailed["location_status"] == "부위 미확정"
+    assert detailed["link_status"] == "복수 원천행 후보·자동 합산 금지"
+    assert detailed["linked_estimate_count"] == 2
+    assert detailed["baseline_file"] == "기준/1A-111.pdf"
+    assert detailed["changed_file"] == "변경/1A-111.pdf"
+
+
+def test_pdf_change_terms_only_uses_exact_changed_estimate_labels():
+    terms = RawPreprocessor._pdf_change_terms(
+        "마감 상세: 시멘트 벽돌 및 비노출 우레탄 방수 H=1800",
+        ["시멘트 벽돌", "비노출 우레탄 방수", "THK.7 지정타일"],
+    )
+
+    assert terms == ["시멘트 벽돌", "비노출 우레탄 방수"]
 
 
 def test_drawing_pairing_does_not_cross_work_packages_or_buildings():

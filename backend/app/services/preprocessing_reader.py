@@ -33,6 +33,8 @@ from .quantity_rule_engine import (
 # gets a new key, and manual candidate selection explicitly invalidates it.
 _RAW_QUANTITY_CACHE: dict[tuple[object, ...], tuple[float, dict]] = {}
 _RAW_QUANTITY_CACHE_TTL_SECONDS = 600.0
+_DRAWING_CANDIDATE_CACHE: dict[tuple[str, int], tuple[float, list[dict[str, object]]]] = {}
+_DRAWING_CANDIDATE_CACHE_TTL_SECONDS = 120.0
 
 
 def clear_raw_quantity_cache(project_id: str | None = None) -> None:
@@ -45,26 +47,31 @@ def clear_raw_quantity_cache(project_id: str | None = None) -> None:
             _RAW_QUANTITY_CACHE.pop(key, None)
 
 
+def clear_drawing_candidate_cache() -> None:
+    """Invalidate the legacy drawing catalogue after a new preprocessing run."""
+    _DRAWING_CANDIDATE_CACHE.clear()
+
+
 _WORK_PACKAGE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("가설공사", ("강관비계", "비계", "현장정리", "먹매김", "규준틀", "타격지점 표시")),
-    ("단열공사", ("압출발포폴리스티렌", "완충스티로폼", "단열재", "단열판")),
-    ("방수공사", ("방수", "우레탄", "도막", "수밀코킹", "방습필름", "지수판")),
+    ("가설공사", ("강관비계", "비계", "강관동바리", "시스템동바리", "현장정리", "건축물보양", "먹매김", "규준틀", "타격지점 표시")),
+    ("단열공사", ("압출발포폴리스티렌", "압출법보온판", "완충스티로폼", "그라스울단열", "보온재", "단열재", "단열판")),
+    ("방수공사", ("방수", "우레탄", "도막", "그라스크로스", "수밀코킹", "방습필름", "지수판")),
     ("조적공사", ("조적", "벽돌", "블록", "빗물받이블럭")),
-    ("철골공사", ("철골", "H-", "H형", "형강", "고장력볼트", "앵커볼트", "앵커 볼트", "anchor bolt", "HILTI HY200", "압연강판", "철강설", "각형각관", "SG", "강재", "ST'L", "스틸")),
-    ("철근콘크리트공사", ("철근", "콘크리트", "레미콘", "거푸집", "유로폼", "와이어메시", "데크플레이트", "HD", "D13", "D16", "D22", "무근")),
-    ("토공사", ("토공", "터파기", "되메우기", "되메우고다지기", "잔토", "굴착", "잡석", "자갈", "토사")),
+    ("철골공사", ("철골", "H-", "H형", "형강", "고장력볼트", "고장력 볼트", "앵커볼트", "앵커 볼트", "관통볼트", "세트앵커", "케미컬앵커", "anchor bolt", "HILTI HY200", "압연강판", "철강설", "철강채널", "각형각관", "SG", "강재", "ST'L", "스틸", "PL-", "파라펫구조틀")),
+    ("철근콘크리트공사", ("철근", "콘크리트", "레미콘", "강섬유", "거푸집", "유로폼", "와이어메시", "데크플레이트", "HD", "D13", "D16", "D22", "무근")),
+    ("토공사", ("토공", "터파기", "되메우기", "되메우고다지기", "유용토 운반", "유용토운반", "잔토", "굴착", "잡석", "자갈", "토사")),
     ("타일공사", ("타일", "치장줄눈", "신축줄눈")),
     ("석공사", ("화강석", "석재", "돌붙임", "물갈기", "카운터-마블", "카운터마블", "인조대리석")),
     ("유리공사", ("유리", "복층유리", "강화유리", "불투명시트")),
-    ("금속공사", ("금속", "알루미늄", "알미늄", "코너비드", "후레싱", "난간", "몰딩", "트랜치커버", "트렌치커버", "al frame", "al프레임", "al base", "프레임", "grill", "그릴", "캐노피", "베이스찬넬", "핸드레일", "손잡이", "루버", "간판", "점자안내도", "key cabinet", "재료분리대", "창상부보강틀", "방습거울후레임", "방습거울설치", "점검사다리", "하지틀")),
+    ("금속공사", ("금속", "알루미늄", "알미늄", "코너비드", "걸레받이비드", "앵글코너가드", "후레싱", "난간", "몰딩", "논슬립", "그레이팅", "메쉬휀스", "야외데크", "트랜치커버", "트렌치커버", "al frame", "al프레임", "al base", "프레임", "grill", "그릴", "캐노피", "베이스찬넬", "핸드레일", "손잡이", "루버", "간판", "사인물", "점자표지판", "점자안내판", "점자안내도", "국기게양대", "우편물수취함", "스텐사다리", "청소용 고리", "청소용고리", "무늬강판", "OILPIT커버", "방습거울", "key cabinet", "재료분리대", "창상부보강틀", "방습거울후레임", "방습거울설치", "점검사다리", "하지틀")),
     ("미장공사", ("몰탈", "모르타르", "미장", "시멘트", "JOINT FILLER", "줄눈", "조면처리")),
     ("도장공사", ("도장", "에폭시", "코팅", "페인트")),
-    ("수장공사", ("석고보드", "장판", "벽지", "천장", "마감", "dry wall", "drywall", "스터드", "세면대하부장", "흡음텍스", "커텐박스", "화장실칸막이", "소변기칸막이", "악세스플로어", "access floor", "열처리목재데크", "PVC걸레받이")),
-    ("패널공사", ("패널", "판넬", "샌드위치")),
+    ("수장공사", ("석고보드", "장판", "벽지", "천장", "열경화성 수지천정재", "천정점검구", "천정틀보강크립", "마루귀틀", "샤워실칸막이", "마감", "dry wall", "drywall", "스터드", "세면대하부장", "흡음텍스", "커텐박스", "화장실칸막이", "소변기칸막이", "악세스플로어", "access floor", "열처리목재데크", "PVC걸레받이")),
+    ("패널공사", ("패널", "판넬", "샌드위치", "아연도골강판")),
     # Door/window schedules often use English hardware names instead of
     # ``창호``. This changes only the filter label and never creates a link.
-    ("창호공사", ("창호", "문", "셔터", "소방관 진입창", "lockset", "lever lock", "flush bolt", "dust proof strike", "door stop", "door closer", "door coordinator", "deadlock", "cylindrical", "half cylinder", "hardware", "pivot", "floor closer", "mortise cylinder", "thumbturn cylinder", "mortise lever set", "mortise lock body", "도아체크", "도어체크", "힌지", "플로어힌지")),
-    ("홈통공사", ("홈통", "드레인")),
+    ("창호공사", ("창호", "문", "셔터", "소방관 진입창", "도어핸들", "lockset", "lever lock", "flush bolt", "dust proof strike", "door stop", "door closer", "door coordinator", "deadlock", "cylindrical", "half cylinder", "hardware", "pivot", "floor closer", "mortise cylinder", "thumbturn cylinder", "mortise lever set", "mortise lock body", "도아체크", "도어체크", "힌지", "플로어힌지")),
+    ("홈통공사", ("홈통", "드레인", "GUTTER")),
     ("승강기공사", ("엘리베이터", "승객용")),
 )
 
@@ -72,17 +79,82 @@ _WORK_PACKAGE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 def infer_work_package(*values: object) -> str:
     """내역서 공사분류 명칭으로 후보 항목을 분류한다."""
     text = " ".join(str(value or "") for value in values).upper()
+    # Structural drawing callouts often use member codes instead of a material
+    # name. Only explicit steel-member codes are classified here; generic
+    # levels such as EL./FL./T.O.S remain manual-review items.
+    if re.search(r"(?:^|[\s:#])(?:SB|SG)\s*\d{2,}[A-Z]?(?:$|[\s:/])", text):
+        return "철골공사"
+    if re.search(r"\b(?:BASE\s*)?PL[- ]?\d{2,}(?:X|×)\d", text):
+        return "철골공사"
     # 창호 리스트의 타입 코드(AW01, AD01, AL01 등)는 품명 대신 식별자로
     # 쓰이는 경우가 많다. 숫자까지 붙은 코드만 창호로 해석해 ``AL몰딩``
     # 같은 일반 금속자재를 잘못 분류하지 않는다.
     if re.search(r"\b(?:AWE|AW|AD|AG|AL)(?:[_-]?[A-Z])?[_-]?\d+", text):
         return "창호공사"
+    # 사무동 문 일람표는 FSD·SSD·SD_E처럼 접두어/층 구분이 붙은
+    # 코드도 사용한다. 일반 금속 코드와 겹치지 않는 문 코드만
+    # 창호공사로 분류한다.
+    if re.search(r"\b(?:FSD|SSD|SD)(?:[_-]?E)?[_-]?\d+", text):
+        return "창호공사"
+    if re.search(r"\b(?:FST|PD)\d+", text) and "사무동" in text:
+        return "창호공사"
+    if re.search(r"\bPW\d+", text) and ("사무동" in text or "PVC" in text):
+        return "창호공사"
+    if "ELEV" in text and ("작업발판" in text or "내부" in text):
+        return "승강기공사"
     if re.search(r"\b(?:SD|SSW)\d{2}\b", text):
         return "창호공사"
     for label, keywords in _WORK_PACKAGE_RULES:
         if any(keyword.upper() in text for keyword in keywords):
             return label
     return "미분류·원천 확인 필요"
+
+
+def classification_status(work_package: object, *values: object) -> str | None:
+    """Explain why an item remains outside the canonical work packages.
+
+    This is intentionally conservative: generic commercial/metadata rows are
+    marked as impossible to classify from the current row, while material or
+    code-like rows stay actionable as ``원천 파일 확인 필요`` until a source
+    sheet provides the missing context.
+    """
+    if str(work_package or "") != "미분류·원천 확인 필요":
+        return None
+    text = " ".join(str(value or "") for value in values).upper()
+    if any(token in text for token in ("부가가치세", "SHOP DRAWING", "DYNAMIC LOAD TEST", "STATIC AXIAL COMPRESSIVE LOAD TEST", "공정")):
+        return "공종 분류 불가"
+    return "원천 파일 확인 필요"
+
+
+_DRAWING_LOCATION_TERMS = (
+    "외벽", "내벽", "벽체", "바닥", "천장", "지붕", "옥상", "기초", "기둥", "보", "슬래브",
+    "계단", "복도", "화장실", "샤워실", "실내", "실외", "현관", "로비", "기계실", "전기실",
+    "층", "구간", "부위", "주차장", "사무실", "회의실", "탕비실", "창고", "입면", "단면",
+)
+_DRAWING_METADATA_TERMS = (
+    "도면목록", "도면번호", "REV.", "REV ", "SCALE", "축척", "PROJECT", "광양5-", "DWG-", "TITLE",
+    "NOTE", "NOTES", "범례", "일반사항", "설계说明", "COPYRIGHT",
+)
+
+
+def drawing_text_role(value: object) -> str:
+    """Classify a drawing string without promoting material text to a location.
+
+    A text entity is evidence, not a geometric area. Spatial terms are kept as
+    location candidates; material/specification labels remain labels requiring
+    a nearby room/detail or object reference before a reviewer accepts them.
+    """
+    text = " ".join(str(value or "").split()).strip()
+    upper = text.upper()
+    if not text:
+        return "부위 미확정"
+    if any(term.upper() in upper for term in _DRAWING_METADATA_TERMS) or re.fullmatch(r"(?:EL|FL|GL|T\.O\.S|T\.O\.C)[.\s:+-]*[\d,.-]+", upper):
+        return "도면 메타데이터"
+    if any(term in text for term in _DRAWING_LOCATION_TERMS):
+        return "부위 표기"
+    if re.search(r"(?:THK|PL[- ]?\d|#?(?:SB|SG)\d|\d+(?:\.\d+)?\s*(?:MM|T|t))", text, flags=re.IGNORECASE) or infer_work_package(text) != "미분류·원천 확인 필요":
+        return "자재·규격 표기"
+    return "부위 미확정"
 
 
 def _clean_text(value: object) -> str:
@@ -243,33 +315,66 @@ class PreprocessingReader:
         match = re.search(r"(?:rev[. _-]?)([A-Za-z0-9]+)", path, flags=re.IGNORECASE)
         return f"Rev.{match.group(1)}" if match else None
 
-    def drawing_candidates(self, limit: int = 200) -> list[dict[str, object]]:
-        """Return drawing-only before/after mapping candidates from preprocessing.
+    @staticmethod
+    def _drawing_work_package(candidate_text: str, candidate_type: str, discipline: str = "") -> str:
+        """Classify each explicit drawing callout without hiding mixed trades.
 
-        The 06 mapping file is deliberately kept separate from the quantity
-        review queue.  A row here means that a drawing pair or a missing side
-        needs human/CAD confirmation; it is not a quantity mismatch and must
-        not be rendered as one.
+        Finish schedules often put ``시멘트 벽돌 / 우레탄 방수`` in one
+        location.  Returning only the first keyword made the masonry evidence
+        disappear under the waterproofing filter.  Keep all clearly labelled
+        packages, while leaving unclassified callouts traceable.
         """
-        rows = self.rows("06_도면_전후매핑후보.csv")
+        packages: list[str] = []
+        for part in re.split(r"[/|·]", candidate_text):
+            package = infer_work_package(part, candidate_type, discipline)
+            if package != "미분류·원천 확인 필요" and package not in packages:
+                packages.append(package)
+        return " · ".join(packages) if packages else infer_work_package(candidate_text, candidate_type, discipline)
+
+    def drawing_candidates(self, limit: int = 200) -> list[dict[str, object]]:
+        """Return traceable drawing candidates, including the detailed prior run.
+
+        The former implementation exposed only ``06_도면_전후매핑후보``.  That
+        file says *which sheets form a pair*, but drops the useful result of
+        the masonry pilot: changed text, drawing coordinates, work package and
+        the raw-estimate/quantity search outcome.  The same audited output was
+        created for architecture and structure, so it is read here as a
+        drawing-only evidence catalogue for every trade.  It is never treated
+        as a quantity judgement or an automatically approved mapping.
+        """
+        cache_key = (str(self.root.resolve()), max(1, min(limit, 2000)))
+        cached = _DRAWING_CANDIDATE_CACHE.get(cache_key)
+        now = time.monotonic()
+        if cached and now - cached[0] < _DRAWING_CANDIDATE_CACHE_TTL_SECONDS:
+            return copy.deepcopy(cached[1])
+
+        pair_rows = self.rows("06_도면_전후매핑후보.csv")
+        pair_by_sheet: dict[str, dict[str, str]] = {}
         result: list[dict[str, object]] = []
-        for row_number, row in enumerate(rows, start=2):
+        for row_number, row in enumerate(pair_rows, start=2):
             baseline_file = (row.get("baseline_file") or "").strip() or None
             changed_file = (row.get("changed_file") or "").strip() or None
             sheet_number = (row.get("sheet_number") or "").strip() or None
             pair_status = (row.get("pair_status") or "검토 후보").strip()
-            if "구조" in " ".join(filter(None, (baseline_file, changed_file))):
-                discipline = "구조"
-            elif "건축" in " ".join(filter(None, (baseline_file, changed_file))):
-                discipline = "건축"
-            else:
-                discipline = (row.get("discipline") or "미분류").strip() or "미분류"
+            discipline_code = (row.get("discipline") or "").strip()
+            if sheet_number:
+                pair_by_sheet[sheet_number] = {
+                    "baseline_file": baseline_file or "",
+                    "changed_file": changed_file or "",
+                    "pair_status": pair_status,
+                    "next_action": (row.get("next_action") or "원본 도면을 확인하세요.").strip(),
+                    "discipline": discipline_code,
+                }
+            # Keep the pair record for sheets where detailed candidate output
+            # does not exist.  It remains useful evidence for a missing side.
             identity = "|".join((baseline_file or "", changed_file or "", sheet_number or "", pair_status))
-            candidate_id = f"DRAW-LEGACY-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:16]}"
+            candidate_id = f"DRAW-PAIR-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:16]}"
+            discipline = "구조" if "구조" in " ".join(filter(None, (baseline_file, changed_file))) else "건축" if "건축" in " ".join(filter(None, (baseline_file, changed_file))) else discipline_code or "미분류"
             result.append({
                 "id": candidate_id,
                 "project_id": "project-g5-office",
                 "discipline": discipline,
+                "work_package": "도면 전후 매핑",
                 "drawing_number": sheet_number,
                 "candidate_text": f"도면 전후 매핑 후보 · {pair_status}",
                 "change_type": pair_status,
@@ -282,9 +387,92 @@ class PreprocessingReader:
                 "baseline_revision": PreprocessingReader._drawing_revision(baseline_file),
                 "changed_revision": PreprocessingReader._drawing_revision(changed_file),
                 "sheet_number": sheet_number,
-                "next_action": (row.get("next_action") or "원본 도면과 CAD 객체를 확인하세요.").strip(),
+                "next_action": (row.get("next_action") or "원본 도면과 PDF 페이지를 확인하세요.").strip(),
             })
-        return result[:max(1, min(limit, 1000))]
+
+        detailed_sources = (
+            ("60_건축_DWG_객체비교/65_사무동_건축도면_자동변경후보_작업대기열.csv", "60_건축_DWG_객체비교/67_사무동_건축변경_원천행_자동연결요약.csv", "건축"),
+            ("23_DWG_객체비교/55_사무동_구조도면_자동변경후보_작업대기열.csv", "23_DWG_객체비교/57_사무동_구조변경_원천행_자동연결요약.csv", "구조"),
+        )
+        for queue_file, evidence_file, discipline in detailed_sources:
+            queue_path = self.root / queue_file
+            if not queue_path.exists():
+                continue
+            evidence_by_queue = {row.get("queue_id", "").strip(): row for row in self.rows(evidence_file)}
+            for row_number, row in enumerate(self.rows(queue_file), start=2):
+                queue_id = (row.get("queue_id") or "").strip()
+                sheet = (row.get("drawing_sheet") or "").strip()
+                # Pair mapping stores the numeric suffix (``111``) while the
+                # detailed architecture/structure queues retain ``1A-111`` /
+                # ``1S-111``.  Strip the full sheet prefix, not just letters,
+                # otherwise the useful baseline/changed file pair disappears.
+                sheet_key = re.sub(r"^[0-9A-Za-z]+-", "", sheet)
+                pair = pair_by_sheet.get(sheet_key, {})
+                evidence = evidence_by_queue.get(queue_id, {})
+                candidate_text = (row.get("candidate_text") or "도면 변경 표기").strip()
+                candidate_type = (row.get("candidate_type") or "도면 변경 후보").strip()
+                work_package = self._drawing_work_package(candidate_text, candidate_type, discipline)
+                text_role = drawing_text_role(candidate_text)
+                location_parts = [f"시트 {sheet}" if sheet else "시트 확인 필요"]
+                layer = (row.get("layer") or "").strip()
+                if layer:
+                    location_parts.append(f"레이어 {layer}")
+                x = (row.get("x") or row.get("baseline_coordinate_x") or "").strip()
+                y = (row.get("y") or row.get("baseline_coordinate_y") or "").strip()
+                if x and y:
+                    location_parts.append(f"좌표 {x}, {y}")
+                location_status = (row.get("location_status") or "").strip()
+                if text_role == "부위 표기":
+                    location_parts.append("부위 후보·원천 위치 확인 필요")
+                else:
+                    location_parts.append("부위 미확정·텍스트 표기만")
+                raw_result = (evidence.get("result") or "").strip()
+                source_count = (evidence.get("source_candidate_count") or "0").strip()
+                if "복수" in raw_result:
+                    link_status = "복수 원천행 후보·자동 합산 금지"
+                elif "정확 연결" in raw_result and "없음" not in raw_result:
+                    link_status = "원천행 연결 후보 있음·검토 필요"
+                else:
+                    link_status = "원천행 연결 근거 없음"
+                source_samples = (evidence.get("source_candidate_samples") or "").strip()
+                identity = "|".join((queue_file, queue_id, sheet, candidate_text))
+                result.append({
+                    "id": f"DRAW-DETAIL-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:16]}",
+                    "project_id": "project-g5-office",
+                    "discipline": discipline,
+                    "work_package": work_package,
+                    "drawing_number": sheet,
+                    "candidate_text": candidate_text,
+                    "text_role": text_role,
+                    "location_status": location_status or ("부위 후보" if text_role == "부위 표기" else "부위 미확정"),
+                    "change_type": (row.get("change_type") or "변경 후보").strip(),
+                    "location_ref": " · ".join(location_parts),
+                    "confidence": (row.get("confidence") or evidence.get("confidence") or "낮음").strip(),
+                    "status": link_status,
+                    "source_row_ref": f"{queue_file}:{row_number}" + (f" · 원천 후보 {source_count}건" if source_count != "0" else ""),
+                    "baseline_file": pair.get("baseline_file") or None,
+                    "changed_file": pair.get("changed_file") or None,
+                    "baseline_revision": self._drawing_revision(pair.get("baseline_file")),
+                    "changed_revision": self._drawing_revision(pair.get("changed_file")),
+                    "sheet_number": sheet,
+                    "next_action": (evidence.get("automatic_next_action") or row.get("automatic_next_action") or pair.get("next_action") or "원본 도면과 원천 행을 함께 확인하세요.").strip(),
+                    "linked_estimate_count": int(source_count) if source_count.isdigit() else 0,
+                    "linked_estimate_names": [source_samples] if source_samples else [],
+                    "link_status": link_status,
+                })
+        # Detailed candidates carry the item/location evidence the reviewer
+        # needs first; the simple pair rows remain after them as sheet-level
+        # fallback records.  Do not silently cap the catalogue below a caller's
+        # explicit limit (the API is allowed to request all office candidates).
+        representative_priority = ("조적", "방수", "철골", "철근콘크리트", "타일", "토공", "금속", "미장", "도장", "수장")
+        def sort_key(item: dict[str, object]) -> tuple[int, int, str, str, str]:
+            package = str(item.get("work_package") or "")
+            trade_priority = next((index for index, token in enumerate(representative_priority) if token in package), len(representative_priority))
+            return (trade_priority, 0 if str(item["id"]).startswith("DRAW-DETAIL") else 1, package, str(item.get("drawing_number") or ""), str(item.get("candidate_text") or ""))
+        result.sort(key=sort_key)
+        limited = result[:max(1, min(limit, 2000))]
+        _DRAWING_CANDIDATE_CACHE[cache_key] = (time.monotonic(), copy.deepcopy(limited))
+        return limited
 
     @staticmethod
     def _display_number(value: object) -> str | None:
@@ -533,13 +721,19 @@ class PreprocessingReader:
                 "source_rows": [],
                 "baseline_source_rows": [],
                 "changed_source_rows": [],
+                "baseline_entries": [],
+                "changed_entries": [],
             })
             if source_set == "기준자료":
                 group["baseline_quantity"] = (group["baseline_quantity"] or 0) + quantity if quantity is not None else group["baseline_quantity"]
                 group["baseline_count"] += 1
+                if quantity is not None:
+                    group["baseline_entries"].append((quantity, str(item.get("source_locator") or "")))
             else:
                 group["changed_quantity"] = (group["changed_quantity"] or 0) + quantity if quantity is not None else group["changed_quantity"]
                 group["changed_count"] += 1
+                if quantity is not None:
+                    group["changed_entries"].append((quantity, str(item.get("source_locator") or "")))
             locator = str(item.get("source_locator") or item.get("source_file") or "").strip()
             if locator and len(group["source_rows"]) < 6:
                 group["source_rows"].append(locator)
@@ -565,9 +759,37 @@ class PreprocessingReader:
             else:
                 comparison = None
                 result_label = "기준자료에만 존재"
+            # Keep a one-to-one representative pair in addition to the
+            # aggregate totals. Generic groups can contain same-name rows
+            # that are additions in the changed estimate; pairing the first
+            # baseline row with the nearest changed source row preserves the
+            # original line-level comparison (e.g. 1,838 -> 2,076 m3) while
+            # retaining aggregate totals for steel and summary analysis.
+            representative_baseline_quantity = None
+            representative_changed_quantity = None
+            representative_source_rows: list[str] = []
+            if group["baseline_entries"] and group["changed_entries"]:
+                baseline_entry = group["baseline_entries"][0]
+                def _row_number(locator: str) -> int:
+                    match = re.search(r"row-(\d+)", locator)
+                    return int(match.group(1)) if match else 10**9
+                changed_entry = min(
+                    group["changed_entries"],
+                    key=lambda entry: abs(_row_number(entry[1]) - _row_number(baseline_entry[1])),
+                )
+                representative_baseline_quantity = self._display_number(baseline_entry[0])
+                representative_changed_quantity = self._display_number(changed_entry[0])
+                representative_source_rows = [entry[1] for entry in (baseline_entry, changed_entry) if entry[1]]
             result.append({
                 "work_package": group["work_package"],
                 "item_key": group["item_key"],
+                # Preserve the standardized name/spec/unit key so a
+                # representative item is never selected by a broad name
+                # (e.g. multiple concrete grades collapsing into "레미콘").
+                "comparison_key": group["comparison_key"],
+                "representative_baseline_quantity": representative_baseline_quantity,
+                "representative_changed_quantity": representative_changed_quantity,
+                "representative_source_rows": representative_source_rows,
                 "item_text": group["item_text"],
                 "baseline_quantity": self._display_number(group["baseline_quantity"]),
                 "changed_quantity": self._display_number(group["changed_quantity"]),
@@ -607,6 +829,7 @@ class PreprocessingReader:
                 "version": "기준↔변경",
                 "discipline": "사무동",
                 "work_package": row["work_package"],
+                "classification_status": classification_status(row["work_package"], row.get("item_text"), row.get("item_key")),
                 "item_key": row["item_key"],
                 "item_text": row["item_text"],
                 "source_file": None,
@@ -818,6 +1041,12 @@ class PreprocessingReader:
                 StandardizedItem.project_id == project_id,
                 StandardizedItem.source_file_id.in_(allowed_source_ids),
                 StandardizedItem.item_kind.in_(["estimate", "quantity"]),
+                # Older snapshots remain in the same table. Restrict the
+                # database scan to the selected run before parsing notes in
+                # Python; this avoids loading hundreds of thousands of stale
+                # rows on every cache miss while retaining the exact run-id
+                # check below as a safety net.
+                StandardizedItem.notes.like(f"%{run.id}%"),
             )
         ).all()
         # StandardizedItem rows are immutable snapshots and can remain from
@@ -1123,6 +1352,7 @@ class PreprocessingReader:
                 "version": version,
                 "discipline": discipline_value,
                 "work_package": work_value,
+                "classification_status": classification_status(work_value, item_text, estimate.specification if estimate else None),
                 "item_key": estimate.item_code or estimate.normalized_name,
                 "comparison_key": "|".join(
                     value for value in (
@@ -1177,16 +1407,18 @@ class PreprocessingReader:
             if query:
                 needle = query.lower()
                 result = [item for item in result if needle in " ".join(str(item.get(key) or "") for key in ("item_text", "item_key", "work_package", "source_locator")).lower()]
+        comparison_counts = Counter(row.get("work_package") or "미분류·원천 확인 필요" for row in baseline_changed_comparison)
         summary = Counter(item["issue_type"] for item in result)
         summary.update({
             "기준자료": sum(1 for item in result if item["source_set"] == "기준자료"),
             "변경자료": sum(1 for item in result if item["source_set"] == "변경자료"),
-            "기준·변경 대조": sum(1 for item in result if item["source_set"] == "기준·변경 대조"),
+            "기준·변경 대조": len(baseline_changed_comparison),
         })
         work_package_counts = {
             source: dict(Counter(item["work_package"] or "미분류·원천 확인 필요" for item in result if item["source_set"] == source))
             for source in ("기준자료", "변경자료", "기준·변경 대조")
         }
+        work_package_counts["기준·변경 대조"] = dict(comparison_counts)
         work_package_counts["전체"] = dict(Counter(item["work_package"] or "미분류·원천 확인 필요" for item in result))
         payload = {
             "project_id": project_id,
@@ -1273,6 +1505,7 @@ class PreprocessingReader:
                 "version": "기준 Rev.0",
                 "discipline": "건축",
                 "work_package": work_package_value,
+                "classification_status": classification_status(work_package_value, row.get("original_item"), row.get("source_item"), row.get("original_spec"), row.get("source_spec")),
                 "item_key": row.get("source_item") or row.get("original_item") or None,
                 "item_text": row.get("original_item") or row.get("source_item") or None,
                 "source_file": source_file,
@@ -1342,6 +1575,7 @@ class PreprocessingReader:
                 "version": version,
                 "discipline": row.get("discipline") or None,
                 "work_package": work_package_value,
+                "classification_status": classification_status(work_package_value, row.get("item_text"), row.get("item_key"), row.get("sheet_or_drawing")),
                 "item_key": row.get("item_key") or None,
                 "item_text": row.get("item_text") or None,
                 "source_file": source_file,
@@ -1387,6 +1621,7 @@ class PreprocessingReader:
                 "version": "기준↔변경",
                 "discipline": row.get("discipline") or None,
                 "work_package": work_package_value,
+                "classification_status": classification_status(work_package_value, row.get("candidate_text"), row.get("candidate_key"), row.get("drawing_sheet"), row.get("source_evidence")),
                 "item_key": row.get("candidate_key") or None,
                 "item_text": row.get("candidate_text") or None,
                 "source_file": None,
@@ -1405,12 +1640,15 @@ class PreprocessingReader:
                 "rule_version": "preprocessing-v1",
                 "locator_status": "RESOLVED" if evidence else "UNRESOLVED",
             })
+        baseline_changed_comparison = self._baseline_changed_comparison(items)
+        comparison_counts = Counter(row.get("work_package") or "미분류·원천 확인 필요" for row in baseline_changed_comparison)
         summary = Counter(item["issue_type"] for item in items)
-        summary.update({"기준자료": sum(1 for item in items if item["source_set"] == "기준자료"), "변경자료": sum(1 for item in items if item["source_set"] == "변경자료"), "기준·변경 대조": sum(1 for item in items if item["source_set"] == "기준·변경 대조")})
+        summary.update({"기준자료": sum(1 for item in items if item["source_set"] == "기준자료"), "변경자료": sum(1 for item in items if item["source_set"] == "변경자료"), "기준·변경 대조": len(baseline_changed_comparison)})
         work_package_counts = {
             source: dict(Counter(item["work_package"] or "미분류·원천 확인 필요" for item in items if item["source_set"] == source))
             for source in ("기준자료", "변경자료", "기준·변경 대조")
         }
+        work_package_counts["기준·변경 대조"] = dict(comparison_counts)
         work_package_counts["전체"] = dict(Counter(item["work_package"] or "미분류·원천 확인 필요" for item in items))
         recheck_rows = self.rows("75_사무동_단순산식_자동검산결과.csv")
         recheck_summary = [{
@@ -1436,5 +1674,5 @@ class PreprocessingReader:
             "items": items[:max(1, min(limit, 5000))],
             "recheck_summary": recheck_summary,
             "material_construction_relation_summary": [],
-            "baseline_changed_comparison": self._baseline_changed_comparison(items),
+            "baseline_changed_comparison": baseline_changed_comparison,
         }

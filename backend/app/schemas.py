@@ -172,6 +172,7 @@ class QuantityAnalysisItem(BaseModel):
     version: str
     discipline: str | None = None
     work_package: str | None = None
+    classification_status: str | None = None
     item_key: str | None = None
     item_text: str | None = None
     source_file: str | None = None
@@ -442,19 +443,46 @@ class ReviewWarningResponse(BaseModel):
     created_at: datetime | None = None
 
 
+class DrawingHighlightRegion(BaseModel):
+    """A reviewed PDF-relative highlight; never a guessed viewport offset."""
+    floor: int | None = None
+    left: str
+    top: str
+    width: str
+    height: str
+    label: str = ""
+
+
 class DrawingCandidateResponse(BaseModel):
     id: str
     project_id: str
     discipline: str | None = None
+    work_package: str | None = None
     drawing_number: str | None = None
     candidate_text: str | None = None
+    text_role: str = "부위 미확정"
     change_type: str
     location_ref: str | None = None
+    location_status: str = "부위 미확정"
     confidence: str | None = None
     status: str
     source_row_ref: str | None = None
     baseline_file: str | None = None
     changed_file: str | None = None
+    # Registered source IDs are intentionally returned separately from the
+    # historical file-path evidence. The browser requests a protected PDF
+    # blob through this ID, never a user supplied server path.
+    baseline_source_file_id: str | None = None
+    changed_source_file_id: str | None = None
+    page_number: int | None = None
+    baseline_page_number: int | None = None
+    changed_page_number: int | None = None
+    # Audited floor-plan references for the masonry PDF pilot. These are
+    # evidence pages, not additional quantity rows or automatic matches.
+    baseline_floor_pages: list[int] = Field(default_factory=list)
+    changed_floor_pages: list[int] = Field(default_factory=list)
+    pdf_highlight_regions: list[DrawingHighlightRegion] = Field(default_factory=list)
+    pdf_page_status: str = "페이지 근거 확인 필요"
     baseline_revision: str | None = None
     changed_revision: str | None = None
     sheet_number: str | None = None

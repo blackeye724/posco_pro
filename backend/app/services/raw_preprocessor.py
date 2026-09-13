@@ -97,6 +97,51 @@ def _text(value: object) -> str | None:
     return text or None
 
 
+_PDF_PERCENT_RE = re.compile(r"^(?:0|[1-9]\d?)(?:\.\d+)?%$")
+
+
+def _drawing_geometry_ref(raw: dict[str, Any]) -> str | None:
+    """Preserve audited PDF-relative highlight regions from an input row.
+
+    A raw preprocessing export may carry the reviewed regions as JSON.  Only
+    percentage coordinates are accepted so CAD viewport offsets or free-form
+    text coordinates cannot silently become a PDF overlay on the next run.
+    """
+    value: object = None
+    for key in ("pdf_highlight_regions", "음영좌표", "변경구간좌표", "highlight_regions"):
+        if raw.get(key):
+            value = raw.get(key)
+            break
+    if value is None:
+        return None
+    try:
+        payload = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if isinstance(payload, dict):
+        payload = payload.get("pdf_highlight_regions", [])
+    if not isinstance(payload, list):
+        return None
+    regions: list[dict[str, object]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        if not all(_PDF_PERCENT_RE.fullmatch(str(item.get(key, "")).strip()) for key in ("left", "top", "width", "height")):
+            continue
+        floor = item.get("floor")
+        if floor is not None and (not isinstance(floor, int) or floor < 1):
+            continue
+        regions.append({
+            "floor": floor,
+            "left": str(item["left"]).strip(),
+            "top": str(item["top"]).strip(),
+            "width": str(item["width"]).strip(),
+            "height": str(item["height"]).strip(),
+            "label": str(item.get("label") or "변경 구간").strip(),
+        })
+    return json.dumps({"pdf_highlight_regions": regions}, ensure_ascii=False) if regions else None
+
+
 def _number(value: object) -> float | None:
     if value is None or value == "":
         return None
@@ -503,6 +548,28 @@ class RawPreprocessor:
         return None
 
     @staticmethod
+    def _pdf_change_terms(page_text: object, item_names: list[str]) -> list[str]:
+        """Return exact item labels visibly present on a PDF drawing page.
+
+        PDF text is supporting drawing evidence, not a replacement for a CAD
+        geometry diff.  We therefore use only normalized *containment* of an
+        existing changed-estimate label and never invent a fuzzy material
+        match.  This lets the masonry pilot pattern (drawing page → item label
+        → source row review) apply equally to waterproofing, tile, steel and
+        other trades when their labels are selectable in the PDF.
+        """
+        page_key = _normalized_name(_text(page_text)) or ""
+        if not page_key:
+            return []
+        terms: list[str] = []
+        for item_name in item_names:
+            label = _text(item_name)
+            key = _normalized_name(label)
+            if label and key and len(key) >= 3 and key in page_key and label not in terms:
+                terms.append(label)
+        return terms[:8]
+
+    @staticmethod
     def _quantity_field_match(estimate: StandardizedItem, quantity: StandardizedItem, aliases: list[dict[str, object]] | None = None) -> tuple[bool, set[str]]:
         """Apply the same canonical name/spec/unit rules to raw uploads.
 
@@ -608,6 +675,7 @@ class RawPreprocessor:
                     )
                 ]
         items_by_kind: dict[str, list[StandardizedItem]] = {"estimate": [], "quantity": [], "drawing": []}
+        drawing_page_rows: list[tuple[SourceFile, str, dict[str, Any]]] = []
         processed = 0
         summary: list[dict[str, Any]] = []
         pending_evidence: list[EvidenceReference] = []
@@ -615,6 +683,8 @@ class RawPreprocessor:
             kind = self._kind(source)
             source_drawing_number = self._drawing_number(source) if kind == "drawing" else None
             for locator, raw in self._rows(source):
+                if kind == "drawing" and raw.get("페이지"):
+                    drawing_page_rows.append((source, locator, raw))
                 mapped = self._map_row(raw)
                 if kind in {"estimate", "quantity"} and not mapped.get("item_name"):
                     mapped["item_name"] = source.original_name
@@ -768,6 +838,46 @@ class RawPreprocessor:
             drawing_number = self._drawing_number(changed_file)
             drawing_id = _safe_id("DRAW", f"{run.project_id}|{baseline.id if baseline else 'none'}|{changed_file.id}|{drawing_number or 'unknown'}")
             db.merge(DrawingChangeCandidate(id=drawing_id, project_id=run.project_id, before_file_id=baseline.id if baseline else None, after_file_id=changed_file.id, discipline=self._drawing_discipline(changed_file), drawing_number=drawing_number, candidate_text="기준·변경 도면 변경 후보", change_type="전후 비교 후보", location_ref=changed_file.sheet_name, confidence="중간" if baseline else "낮음", status="연결 후보", baseline_file=baseline.file_path if baseline else None, changed_file=changed_file.file_path, baseline_revision=baseline.revision if baseline else None, changed_revision=changed_file.revision, sheet_number=changed_file.sheet_name))
+        # PDF drawings are commonly supplied instead of a CAD worker.  Persist
+        # one page-level candidate only when selectable text contains an exact
+        # changed-estimate label.  A page with no such label remains covered by
+        # the sheet/file candidate above; it must not become a made-up item
+        # mapping.  This is deliberately independent of trade names so the
+        # audited masonry flow works for every office-building work package.
+        changed_estimate_names = [
+            item.item_name for item in items_by_kind["estimate"]
+            if (source := db.get(SourceFile, item.source_file_id)) and source.version_type == "변경"
+        ]
+        for changed_file, locator, raw in drawing_page_rows:
+            if changed_file.version_type != "변경" or Path(changed_file.file_path).suffix.lower() != ".pdf":
+                continue
+            page_number = _text(raw.get("페이지"))
+            terms = self._pdf_change_terms(raw.get("도면텍스트"), changed_estimate_names)
+            if not terms:
+                continue
+            baseline = self._match_baseline_drawing(changed_file, base)
+            drawing_number = self._drawing_number(changed_file)
+            candidate_id = _safe_id("DRAW", f"{run.project_id}|pdf-page|{baseline.id if baseline else 'none'}|{changed_file.id}|{page_number}|{'|'.join(terms)}")
+            db.merge(DrawingChangeCandidate(
+                id=candidate_id,
+                project_id=run.project_id,
+                before_file_id=baseline.id if baseline else None,
+                after_file_id=changed_file.id,
+                discipline=self._drawing_discipline(changed_file),
+                drawing_number=drawing_number,
+                candidate_text=f"PDF 도면 표기 · {' · '.join(terms)}",
+                change_type="PDF 표기 연결 후보",
+                location_ref=f"PDF 페이지 {page_number} · 텍스트 추출",
+                confidence="중간" if baseline else "낮음",
+                status="PDF 표기·내역 연결 후보",
+                source_row_ref=locator,
+                geometry_ref=_drawing_geometry_ref(raw),
+                baseline_file=baseline.file_path if baseline else None,
+                changed_file=changed_file.file_path,
+                baseline_revision=baseline.revision if baseline else None,
+                changed_revision=changed_file.revision,
+                sheet_number=changed_file.sheet_name,
+            ))
         artifact_dir = self.upload_root / run.project_id / "preprocessing"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact_path = artifact_dir / f"{run.id}.json"

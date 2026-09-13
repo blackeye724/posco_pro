@@ -4,13 +4,19 @@ import hashlib
 import json
 import logging
 import re
+import shutil
+import subprocess
+import tempfile
+import time
+from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -86,13 +92,65 @@ from .schemas import (
     SourceFileResponse,
     Stat,
 )
-from .services.preprocessing_reader import PreprocessingReader, clear_raw_quantity_cache, infer_work_package
+from .services.preprocessing_reader import PreprocessingReader, clear_drawing_candidate_cache, clear_raw_quantity_cache, drawing_text_role, infer_work_package
 from .services.quantity_rule_engine import canonical_key as comparison_key, canonical_unit as comparison_unit
 from .services.price_lookup import PriceLookupService
 
 logger = logging.getLogger(__name__)
 from .services.rule_engine import RuleEngine
 from .services.raw_preprocessor import RawPreprocessor, is_non_office_scope
+
+
+# Drawing candidates are immutable evidence until the next preprocessing run.
+# Cache the merged response briefly so revisiting the drawings screen does not
+# repeat model validation for all 1,348 legacy rows.
+_DRAWING_RESPONSE_CACHE: dict[tuple[str, str | None, int], tuple[float, list[DrawingCandidateResponse]]] = {}
+_DRAWING_RESPONSE_CACHE_TTL_SECONDS = 120.0
+
+
+def clear_drawing_response_cache() -> None:
+    _DRAWING_RESPONSE_CACHE.clear()
+
+
+_PDF_PERCENT_RE = re.compile(r"^(?:0|[1-9]\d?)(?:\.\d+)?%$")
+
+
+def _stored_pdf_highlight_regions(geometry_ref: str | None) -> list[dict[str, object]]:
+    """Read only explicitly stored PDF-relative regions from a candidate.
+
+    ``geometry_ref`` is an audit payload written by preprocessing.  Requiring
+    percentage coordinates prevents a CAD viewport offset or an arbitrary
+    text coordinate from being mistaken for a PDF highlight.  Invalid or
+    missing geometry is intentionally returned as an empty list.
+    """
+    if not geometry_ref:
+        return []
+    try:
+        payload = json.loads(geometry_ref)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if isinstance(payload, dict):
+        payload = payload.get("pdf_highlight_regions", [])
+    if not isinstance(payload, list):
+        return []
+    regions: list[dict[str, object]] = []
+    for raw in payload:
+        if not isinstance(raw, dict):
+            continue
+        if not all(_PDF_PERCENT_RE.fullmatch(str(raw.get(key, "")).strip()) for key in ("left", "top", "width", "height")):
+            continue
+        floor = raw.get("floor")
+        if floor is not None and (not isinstance(floor, int) or floor < 1):
+            continue
+        regions.append({
+            "floor": floor,
+            "left": str(raw["left"]).strip(),
+            "top": str(raw["top"]).strip(),
+            "width": str(raw["width"]).strip(),
+            "height": str(raw["height"]).strip(),
+            "label": str(raw.get("label") or "변경 구간").strip(),
+        })
+    return regions
 
 
 def is_demo_source_name(value: str | None) -> bool:
@@ -110,6 +168,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="공사비 적정성 검토 API", version="0.1.0", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origin_list,
@@ -382,6 +441,8 @@ def execute_preprocessing_run(run_id: str) -> None:
                 run.processed_count = processed
                 run.finished_at = datetime.now(timezone.utc)
                 db.commit()
+                clear_drawing_candidate_cache()
+                clear_drawing_response_cache()
                 return
             except Exception as error:
                 last_error = error
@@ -420,6 +481,8 @@ def execute_legacy_import(run_id: str, project_id: str) -> None:
         run.processed_count = int(result["processed"])
         run.finished_at = datetime.now(timezone.utc)
         db.commit()
+        clear_drawing_candidate_cache()
+        clear_drawing_response_cache()
     except Exception as error:
         db.rollback()
         run = db.get(PreprocessingRun, run_id)
@@ -446,6 +509,203 @@ def project_files(project_id: str, include_deleted: bool = False, db: Session = 
         for source_id in json.loads(run.source_file_ids or "[]"):
             run_by_source.setdefault(source_id, (run.id, run.status, run.error_message))
     return [SourceFileResponse.model_validate(row, from_attributes=True).model_copy(update={"preprocessing_run_id": (run_by_source.get(row.id) or (None, None, None))[0], "preprocessing_status": (run_by_source.get(row.id) or (None, None, None))[1], "preprocessing_error": (run_by_source.get(row.id) or (None, None, None))[2]}) for row in rows]
+
+
+@app.get("/api/v1/projects/{project_id}/files/{file_id}/pdf")
+def project_source_pdf(project_id: str, file_id: str, db: Session = Depends(get_db), _: Principal = Depends(require_read)):
+    """Return an uploaded PDF only through its audited source-file record.
+
+    Historical DXF catalogue paths must never become arbitrary downloads.
+    The PDF viewer is available only for a valid PDF registered to this
+    project.
+    """
+    require_project(project_id, db)
+    record = db.scalar(select(SourceFile).where(
+        SourceFile.id == file_id,
+        SourceFile.project_id == project_id,
+        SourceFile.is_valid.is_(True),
+    ))
+    if not record:
+        raise HTTPException(404, "원본 PDF를 찾을 수 없습니다.")
+    path = Path(record.file_path)
+    if record.file_type.upper() != "PDF" or path.suffix.lower() != ".pdf":
+        raise HTTPException(415, "PDF 원본만 미리보기로 열 수 있습니다.")
+    if not path.is_file():
+        raise HTTPException(404, "원본 PDF 파일이 저장소에 없습니다.")
+    # FileResponse encodes non-ASCII filenames safely. Do not construct a raw
+    # Content-Disposition header here: Korean filenames are not Latin-1.
+    return FileResponse(path=str(path), media_type="application/pdf", filename=record.original_name)
+
+
+def _legacy_office_drawing_pdf(discipline: str | None, side: str, bundle: str = "main") -> Path | None:
+    """Resolve the audited office-building PDF bundles used for review.
+
+    Legacy detailed candidates are DXF-derived and retain their sheet/coordinate
+    evidence. The PDF bundle is a visual source aid for the same architectural
+    or structural drawing set; it is never selected from a request path.
+    """
+    source_root = get_settings().preprocessing_dir.resolve().parent
+    paths = {
+        ("건축", "baseline"): source_root / "기초자료" / "도면자료" / "광양5-1A-02-DWG-100 사무동 건축기본도면 (Rev.0).pdf",
+        ("건축", "changed"): source_root / "변경자료" / "도면자료" / "02. PDF" / "광양5-준공-1A-02-DWG-100_사무동 건축도면_Rev.F.pdf",
+        ("구조", "baseline"): source_root / "기초자료" / "도면자료" / "광양5-1S-02-DWG-100 사무동 구조도면 (Rev.0).pdf",
+        ("구조", "changed"): source_root / "변경자료" / "도면자료" / "02. PDF" / "광양5-준공-1S-02-DWG-100_사무동 구조도면_Rev.F.pdf",
+    }
+    # 조적 검토도 기준·변경 모두 같은 ``DWG-100`` 묶음의 층별 평면도를
+    # 사용한다. 이전에는 기준만 DWG-500의 벽체 안내도로 바꿔 표시했는데,
+    # 변경 도면의 DWG-201/202 평면도와 동일 종류의 시트가 아니어서
+    # 좌표를 보정해도 전후 비교가 성립하지 않았다.
+    path = paths.get((discipline or "", side))
+    return path if path and path.is_file() else None
+
+
+@lru_cache(maxsize=8)
+def _pdf_outline_pages(path_value: str) -> dict[str, int]:
+    """Read PDF bookmarks once and expose a sheet-number → page map.
+
+    The audited baseline PDFs are image drawings, so a full text scan cannot
+    reliably recover sheets.  Their PDF bookmarks do retain the sheet number;
+    using them restores the PDF-based masonry review without a CAD renderer.
+    """
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(path_value)
+        pages: dict[str, int] = {}
+
+        def walk(nodes: object) -> None:
+            if not isinstance(nodes, list):
+                return
+            for node in nodes:
+                if isinstance(node, list):
+                    walk(node)
+                    continue
+                if not hasattr(node, "get"):
+                    continue
+                title = str(node.get("/Title") or "")
+                match = re.search(r"DWG-(\d+[A-Za-z]?)", title, flags=re.IGNORECASE)
+                if not match:
+                    continue
+                try:
+                    pages.setdefault(match.group(1).upper(), reader.get_destination_page_number(node) + 1)
+                except Exception:
+                    continue
+
+        walk(reader.outline)
+        return pages
+    except Exception:
+        # A missing/corrupt bookmark is review metadata only.  The source PDF
+        # remains available and is never replaced with a fabricated diagram.
+        return {}
+
+
+def _legacy_office_drawing_page(discipline: str | None, side: str, drawing_number: str | None, bundle: str = "main") -> int | None:
+    # 조적 검토는 기준·변경 모두 층별 평면도로 비교한다. DWG-111은
+    # 마감재료표이므로 벽돌의 대표 내역 근거로는 쓸 수 있어도 위치 도면으로
+    # 쓰면 안 된다. 두 PDF의 실제 페이지 조합을 명시한다.
+    if bundle == "masonry-plan" and discipline == "건축" and drawing_number:
+        if side == "baseline" and drawing_number.startswith("1A-"):
+            return {"1A-201": 10, "1A-202": 11}.get(drawing_number.strip())
+        if side == "changed" and drawing_number.startswith("1A-"):
+            return {"1A-201": 11, "1A-202": 12}.get(drawing_number.strip())
+    path = _legacy_office_drawing_pdf(discipline, side, bundle)
+    if not path or not drawing_number:
+        return None
+    sheet_match = re.search(r"-(\d+[A-Za-z]?)$", drawing_number.strip())
+    if not sheet_match:
+        return None
+    return _pdf_outline_pages(str(path)).get(sheet_match.group(1).upper())
+
+
+@lru_cache(maxsize=16)
+def _pdf_page_png(path_value: str, page_number: int) -> bytes | None:
+    """Rasterize exactly one audited PDF page for browsers without a PDF viewer.
+
+    This is a PDF-page preview, not a CAD renderer or inferred geometry.  The
+    output is kept only in-process and regenerated after a server restart.
+    """
+    converter = shutil.which("pdftoppm")
+    if not converter or page_number < 1:
+        return None
+    cache_root = get_settings().upload_dir.resolve()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="pdf-page-", dir=str(cache_root)) as directory:
+        output_root = Path(directory) / "preview"
+        try:
+            subprocess.run(
+                [converter, "-f", str(page_number), "-l", str(page_number), "-png", "-singlefile", "-scale-to", "1400", path_value, str(output_root)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+            output_path = output_root.with_suffix(".png")
+            return output_path.read_bytes() if output_path.is_file() else None
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+
+def _drawing_pdf_source(project_id: str, candidate_id: str, side: str, db: Session, bundle: str = "main") -> tuple[Path | None, str]:
+    """Resolve one registered or audited drawing PDF without exposing a path."""
+    candidate = db.scalar(select(DrawingChangeCandidate).where(
+        DrawingChangeCandidate.id == candidate_id,
+        DrawingChangeCandidate.project_id == project_id,
+    ))
+    if candidate:
+        source_id = candidate.before_file_id if side == "baseline" else candidate.after_file_id
+        if source_id:
+            source = db.scalar(select(SourceFile).where(
+                SourceFile.id == source_id,
+                SourceFile.project_id == project_id,
+                SourceFile.is_valid.is_(True),
+            ))
+            if source and source.file_type.upper() == "PDF":
+                path = Path(source.file_path)
+                if path.is_file():
+                    return path, source.original_name
+    elif project_id == "project-g5-office" and candidate_id.startswith(("DRAW-DETAIL-", "DRAW-PAIR-")):
+        legacy = next((item for item in PreprocessingReader().drawing_candidates(limit=2000) if item.get("id") == candidate_id), None)
+        if legacy:
+            path = _legacy_office_drawing_pdf(str(legacy.get("discipline") or ""), side, bundle)
+            return path, path.name if path else ""
+    return None, ""
+
+
+@app.get("/api/v1/projects/{project_id}/drawings/changes/{candidate_id}/pdf")
+def project_drawing_candidate_pdf(
+    project_id: str,
+    candidate_id: str,
+    side: str = Query(..., pattern="^(baseline|changed)$"),
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_read),
+):
+    """Serve the exact registered or audited PDF evidence for one candidate."""
+    require_project(project_id, db)
+    path, filename = _drawing_pdf_source(project_id, candidate_id, side, db)
+    if not path:
+        raise HTTPException(404, "이 도면 후보에 연결된 PDF 원본이 없습니다.")
+    return FileResponse(path=str(path), media_type="application/pdf", filename=filename)
+
+
+@app.get("/api/v1/projects/{project_id}/drawings/changes/{candidate_id}/pdf-preview")
+def project_drawing_candidate_pdf_preview(
+    project_id: str,
+    candidate_id: str,
+    side: str = Query(..., pattern="^(baseline|changed)$"),
+    page: int = Query(..., ge=1, le=2000),
+    bundle: str = Query(default="main", pattern="^(main|masonry-plan)$"),
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_read),
+):
+    """Return one real PDF page as PNG when the browser has no PDF plugin."""
+    require_project(project_id, db)
+    path, _ = _drawing_pdf_source(project_id, candidate_id, side, db, bundle)
+    if not path:
+        raise HTTPException(404, "이 도면 후보에 연결된 PDF 원본이 없습니다.")
+    image = _pdf_page_png(str(path), page)
+    if not image:
+        raise HTTPException(503, "PDF 페이지 미리보기를 생성할 수 없습니다.")
+    return Response(content=image, media_type="image/png", headers={"Cache-Control": "private, max-age=600"})
 
 
 @app.delete("/api/v1/projects/{project_id}/files/{file_id}", response_model=SourceFileResponse)
@@ -876,8 +1136,12 @@ def project_warnings(project_id: str, severity: str | None = None, status: str |
 
 
 @app.get("/api/v1/projects/{project_id}/drawings/changes", response_model=list[DrawingCandidateResponse])
-def project_drawing_candidates(project_id: str, status: str | None = None, limit: int = Query(100, ge=1, le=1000), db: Session = Depends(get_db), _: Principal = Depends(require_read)):
+def project_drawing_candidates(project_id: str, status: str | None = None, limit: int = Query(100, ge=1, le=2000), db: Session = Depends(get_db), _: Principal = Depends(require_read)):
     require_project(project_id, db)
+    cache_key = (project_id, status, limit)
+    cached = _DRAWING_RESPONSE_CACHE.get(cache_key)
+    if cached and time.monotonic() - cached[0] < _DRAWING_RESPONSE_CACHE_TTL_SECONDS:
+        return cached[1]
     query = select(DrawingChangeCandidate).where(DrawingChangeCandidate.project_id == project_id)
     if status:
         query = query.where(DrawingChangeCandidate.status == status)
@@ -918,7 +1182,65 @@ def project_drawing_candidates(project_id: str, status: str | None = None, limit
     def with_link_evidence(item: DrawingChangeCandidate | dict) -> DrawingCandidateResponse:
         if isinstance(item, dict):
             response = DrawingCandidateResponse.model_validate(item)
-            return response
+            masonry_plan = project_id == "project-g5-office" and response.discipline == "건축" and "조적" in (response.work_package or "")
+            pdf_bundle = "masonry-plan" if masonry_plan else "main"
+            baseline_pdf = _legacy_office_drawing_pdf(response.discipline, "baseline", pdf_bundle) if project_id == "project-g5-office" else None
+            changed_pdf = _legacy_office_drawing_pdf(response.discipline, "changed", pdf_bundle) if project_id == "project-g5-office" else None
+            # Historic office candidates originated from a DXF catalogue, but
+            # the review source is the paired PDF.  Recover the bookmarked
+            # page here rather than treating a text coordinate as a drawing
+            # renderer or showing page 1 for every masonry item.
+            baseline_page = _legacy_office_drawing_page(response.discipline, "baseline", response.drawing_number or response.sheet_number, pdf_bundle) if baseline_pdf else None
+            changed_page = _legacy_office_drawing_page(response.discipline, "changed", response.drawing_number or response.sheet_number, pdf_bundle) if changed_pdf else None
+            page_number = baseline_page or changed_page or response.page_number
+            # DWG-111의 마감재료표 텍스트는 위치 근거가 아니다. 같은 형식의
+            # 평면도끼리만 화면에 비교한다: 기준 DWG-100 p.10/11 ↔ 변경
+            # DWG-100 p.11/12. 위치 좌표가 확인되지 않은 공종은 이 페이지를
+            # 보여 주되 음영을 추정해 그리지 않는다.
+            # 현재 대표 표시로 확인된 층은 1층(기준 p.10 ↔ 변경 p.11)만
+            # 제공한다. 2층은 기준/변경 도면 유형과 범위가 달라 대표 구간을
+            # 임의로 만들지 않고 화면에서 제외한다.
+            baseline_floor_pages = [10] if masonry_plan else []
+            changed_floor_pages = [11] if masonry_plan else []
+            # 조적 대표 변경은 사용자가 확인한 1층 원본 PDF 확대 구간
+            # (121 냉장실·122 냉동실 주변 벽체)을 검토 지원용으로 표시한다.
+            # 승인 확정 좌표가 아니라, 동일 층 변경 PDF에서 이해를 돕는
+            # 대표 범위이며 다른 층에는 재사용하지 않는다.
+            pdf_highlight_regions = ([
+                {
+                    "floor": 1,
+                    "left": "68.0%",
+                    "top": "28.0%",
+                    "width": "11.5%",
+                    "height": "27.0%",
+                    "label": "1층 조적 변경 구간 · 121·122실 벽체",
+                },
+            ] if masonry_plan else [])
+            package_text = response.work_package or ""
+            if masonry_plan:
+                pdf_page_status = "동일 층 평면도 비교 · 확인된 대표 변경 구간 음영 표시"
+            elif "철골" in package_text and baseline_page == 15:
+                pdf_page_status = "철골 구조 입면도 표시"
+            elif any(token in package_text for token in ("방수", "타일")) and baseline_page == 4:
+                pdf_page_status = "마감재료표 표시 · 변경 표기 참고"
+            elif "토공" in package_text and baseline_page == 50:
+                pdf_page_status = "구조 상세도 표시 · 변경 표기 참고"
+            else:
+                pdf_page_status = "PDF 시트 표시" if baseline_page or changed_page else "PDF 원본 표시"
+            return response.model_copy(update={
+                "work_package": response.work_package or PreprocessingReader._drawing_work_package(response.candidate_text or "", response.discipline or ""),
+                "text_role": response.text_role or drawing_text_role(response.candidate_text),
+                "location_status": response.location_status or ("부위 후보" if drawing_text_role(response.candidate_text) == "부위 표기" else "부위 미확정"),
+                "baseline_file": str(baseline_pdf) if baseline_pdf else response.baseline_file,
+                "changed_file": str(changed_pdf) if changed_pdf else response.changed_file,
+                "page_number": page_number,
+                "baseline_page_number": baseline_page,
+                "changed_page_number": changed_page,
+                "baseline_floor_pages": baseline_floor_pages,
+                "changed_floor_pages": changed_floor_pages,
+                "pdf_highlight_regions": pdf_highlight_regions,
+                "pdf_page_status": pdf_page_status,
+            })
         response = DrawingCandidateResponse.model_validate(item, from_attributes=True)
         drawing_number = (item.drawing_number or item.sheet_number or "").strip().lower()
         baseline_matches = [row for row in estimates_by_source.get(item.before_file_id or "", []) if drawing_number and (row.drawing_number or "").strip().lower() == drawing_number]
@@ -933,27 +1255,42 @@ def project_drawing_candidates(project_id: str, status: str | None = None, limit
             link_status = "기준 내역 연결됨·변경 근거 없음"
         else:
             link_status = "내역 연결 근거 없음"
+        page_match = re.search(r"PDF\s*페이지\s*(\d+)", item.location_ref or "", flags=re.IGNORECASE)
+        stored_highlights = _stored_pdf_highlight_regions(item.geometry_ref)
         return response.model_copy(update={
+            "work_package": PreprocessingReader._drawing_work_package(item.candidate_text or "", item.discipline or ""),
+            "text_role": drawing_text_role(item.candidate_text),
+            "location_status": "부위 후보" if drawing_text_role(item.candidate_text) == "부위 표기" else "부위 미확정",
+            "baseline_source_file_id": item.before_file_id,
+            "changed_source_file_id": item.after_file_id,
+            "page_number": int(page_match.group(1)) if page_match else None,
             "linked_estimate_count": len(matches),
             "linked_estimate_names": names,
             "link_status": link_status,
+            "pdf_highlight_regions": stored_highlights,
         })
-    # The seeded project may contain a legacy sample candidate from the first
-    # UI mock.  Prefer the immutable 06 mapping output when DB rows do not yet
-    # carry a real before/after file pair.  This keeps drawing candidates in
-    # their own review flow and prevents them from appearing as quantity rows.
-    has_file_backed_candidate = any(item.baseline_file or item.changed_file for item in db_items)
-    if not has_file_backed_candidate and project_id == "project-g5-office":
+    # The first UI mock returned either a file-level DB pair or the old 06
+    # mapping sheet.  That hid the detailed masonry/architecture/structure
+    # preprocessing records as soon as one raw upload existed.  Merge the
+    # immutable catalogue with current raw-upload candidates instead: both are
+    # drawing evidence, neither is a quantity judgement or an automatic link.
+    legacy_items: list[dict] = []
+    if project_id == "project-g5-office":
         try:
             legacy_items = PreprocessingReader().drawing_candidates(limit=limit)
         except FileNotFoundError:
             legacy_items = []
         if status:
-            # Legacy candidates currently expose a single human-review status.
             legacy_items = [item for item in legacy_items if item.get("status") == status]
-        if legacy_items:
-            return [DrawingCandidateResponse.model_validate(item) for item in legacy_items]
-    return [with_link_evidence(item) for item in db_items]
+    merged: list[DrawingChangeCandidate | dict] = [*legacy_items, *db_items]
+    deduplicated: dict[str, DrawingChangeCandidate | dict] = {}
+    for item in merged:
+        identity = item.get("id") if isinstance(item, dict) else item.id
+        if identity:
+            deduplicated[str(identity)] = item
+    response = [with_link_evidence(item) for item in list(deduplicated.values())[:limit]]
+    _DRAWING_RESPONSE_CACHE[cache_key] = (time.monotonic(), response)
+    return response
 
 
 @app.get("/api/v1/projects/{project_id}/quantities", response_model=list[ReviewWarningResponse])
