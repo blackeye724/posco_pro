@@ -9,7 +9,18 @@ from sqlalchemy.sql import func
 from .config import get_settings
 
 settings = get_settings()
-engine = create_engine(settings.database_url, pool_pre_ping=True)
+
+
+def normalize_database_url(value: str) -> str:
+    """Use the bundled psycopg 3 driver for provider-style PostgreSQL URLs."""
+    if value.startswith("postgres://"):
+        return "postgresql+psycopg://" + value[len("postgres://"):]
+    if value.startswith("postgresql://"):
+        return "postgresql+psycopg://" + value[len("postgresql://"):]
+    return value
+
+
+engine = create_engine(normalize_database_url(settings.database_url), pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
