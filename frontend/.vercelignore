@@ -1,0 +1,6 @@
+.pytest_cache/
+.next/
+.next-dev/
+node_modules/
+*.log
+tsconfig.tsbuildinfo
