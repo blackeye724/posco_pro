@@ -106,6 +106,23 @@ Vercel 프로젝트에는 다음 공개 변수만 등록합니다.
 
 배포 후에는 (1) `/health` 응답 확인, (2) 인증된 어느 계정에서든 단가 조회 요청, (3) 저장 참고단가가 없는 대표 품목 1건의 `조회 완료` 또는 추적 가능한 오류 상태 확인, (4) 구매부서 `적용 후보` 판단 후 잠정금액 계산을 순서대로 실행합니다. 조회 후보 수집은 모든 인증 사용자에게 허용하지만, 단가 적용 판단은 구매부서 또는 관리자만 수행합니다. URL·키 중 하나라도 빠지면 API를 호출하지 않고 `조회 보류`로 남으며, 저장 참고단가·공식 CSV 우선순위는 그대로 유지됩니다.
 
+### Render에서 FastAPI·PostgreSQL 올리기
+
+저장소 루트의 `render.yaml`은 `backend` 웹 서비스와 PostgreSQL을 함께 만드는
+Blueprint입니다. Render Dashboard에서 **New → Blueprint**를 선택하고 이
+GitHub 저장소의 `render.yaml`을 지정하면 됩니다. 최초 생성 화면에서
+`MVP_*_PASSWORD` 4개와 `PRICE_API_URL`·`PRICE_API_KEY`(또는
+`PUBLIC_DATA_SERVICE_KEY`)를 입력합니다. 배포가 끝나면 Render가 발급한 API
+주소에 `/api/v1`을 붙여 Vercel Production 환경의
+`NEXT_PUBLIC_API_BASE_URL`로 등록하고 Production 재배포를 실행합니다.
+
+Blueprint는 무료 플랜에서 동작하도록 파일 경로를 `/tmp`로 지정합니다.
+무료 플랜에서는 서비스 재시작 시 업로드·엑셀·PDF 파일이 사라질 수 있으므로
+운영 보존이 필요하면 Render 유료 영구 디스크를 `/var/data`에 연결하고
+`UPLOAD_DIR=/var/data/uploads`, `EXPORT_DIR=/var/data/exports`,
+`PREPROCESSING_DIR=/var/data/preprocessing`으로 바꾸세요. PostgreSQL 데이터는
+별도 데이터베이스에 저장되므로 웹 서비스 재시작과 분리됩니다.
+
 외부 API 호출 전에는 백엔드에서 아래 명령으로 키 값 없이 설정 상태만 확인할 수 있습니다. `--dry-run`을 빼면 설정이 완전할 때만 대표 품목 1건을 호출하며, DB에는 저장하지 않습니다.
 
 ```powershell
