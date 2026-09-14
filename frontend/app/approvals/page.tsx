@@ -9,7 +9,7 @@ const stages = ["공사부서", "설계부서", "구매부서"];
 const dataScopeOptions = ["전체", "운영 자료", "통합 테스트"] as const;
 type DataScope = typeof dataScopeOptions[number];
 type ReviewStage = "all" | "initial" | "change" | "price";
-const stageLabels: Record<ReviewStage, string> = { all: "전체 확인 요청", initial: "01 최초자료", change: "02 설계변경", price: "03 신규내역 단가" };
+const stageLabels: Record<ReviewStage, string> = { all: "전체 검토 대상", initial: "01 최초자료", change: "02 설계변경", price: "03 신규내역 단가" };
 
 function warningOrigin(item: Warning): DataScope {
   if (item.data_origin) return item.data_origin;

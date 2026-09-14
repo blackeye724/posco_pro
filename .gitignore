@@ -14,6 +14,14 @@ backend/uvicorn-*.log
 frontend/next-dev*.log
 backend-dev*.log
 frontend/frontend-dev*.log
+*.log
+
+# Local test scratch directories
+backend/.test-*/
+backend/.pytest-*/
+backend/*-tmp/
+backend/tmp/
+tmp/
 
 # Local runtime data and uploaded source files stay outside source snapshots.
 uploads/

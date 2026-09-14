@@ -183,7 +183,10 @@ def main() -> None:
     checks.append("preprocessing-and-queries")
 
     expect_error(f"/projects/{PROJECT_ID}/reviews/test-source/approvals", "POST", {"department": "공사부서", "decision": "승인", "reviewer": "anonymous", "comment": "인증 누락"}, expected=401, anonymous=True)
-    expect_error(f"/projects/{PROJECT_ID}/prices/query", "POST", {"item_name": "권한 테스트"}, "user-design-reviewer", expected=403)
+    # 단가 조회 후보 수집은 모든 인증 사용자에게 허용한다. 실제 적용
+    # 판단(decision)은 구매부서/관리자 권한으로 별도 제한한다.
+    status, lookup_candidate = request(f"/projects/{PROJECT_ID}/prices/query", "POST", {"item_name": "권한 테스트", "unit": "식"}, "user-design-reviewer")
+    assert status == 202 and lookup_candidate["lookup_status"], "price lookup authenticated user"
     checks.append("auth-and-department-permissions")
 
     status, job = request(f"/projects/{PROJECT_ID}/rules/run", "POST", user="pfc391")

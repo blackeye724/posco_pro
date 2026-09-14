@@ -348,6 +348,7 @@ class JobResponse(BaseModel):
 
 class ReviewExportRequest(BaseModel):
     review_run_id: str | None = Field(default=None, max_length=100)
+    review_stage: str | None = Field(default=None, max_length=30)
     building_id: str | None = Field(default=None, max_length=100)
     work_package_id: str | None = Field(default=None, max_length=100)
     status: str | None = Field(default=None, max_length=50)
@@ -391,6 +392,9 @@ class PriceLookupResponse(BaseModel):
     specification: str | None = None
     unit: str | None = None
     price: float | None = None
+    material_cost: float | None = None
+    labor_cost: float | None = None
+    expense_cost: float | None = None
     service_name: str
     source_file_id: str | None = None
     reference_date: datetime | None = None
@@ -406,6 +410,15 @@ class PriceLookupResponse(BaseModel):
     best_reference_price: float | None = None
     best_reference_scope: str | None = None
     reference_match_status: str = "참고단가 미확인"
+    decision: str = "미검토"
+    applied_price: float | None = None
+    quantity_for_pricing: float | None = None
+    provisional_amount: float | None = None
+    # API 응답을 원문 그대로 노출하지 않고, 검토자가 재조회 여부를
+    # 판단할 수 있는 안전한 요약만 제공한다.
+    lookup_detail: str | None = None
+    retry_available: bool = False
+    provisional_amount_status: str = "수량·단가 승인 후 계산"
 
 
 class PriceDecisionRequest(BaseModel):
@@ -453,6 +466,22 @@ class DrawingHighlightRegion(BaseModel):
     label: str = ""
 
 
+class DrawingFloorEvidence(BaseModel):
+    """An audited floor-level drawing pair used by the review workspace.
+
+    ``baseline_page`` may be null for a newly added floor.  In that case the
+    UI must show an explicit "기준 도면 없음" state instead of substituting
+    an unrelated floor or page.
+    """
+    floor: int
+    label: str = ""
+    baseline_page: int | None = None
+    changed_page: int | None = None
+    baseline_sheet: str | None = None
+    changed_sheet: str | None = None
+    highlight_regions: list[DrawingHighlightRegion] = Field(default_factory=list)
+
+
 class DrawingCandidateResponse(BaseModel):
     id: str
     project_id: str
@@ -477,11 +506,12 @@ class DrawingCandidateResponse(BaseModel):
     page_number: int | None = None
     baseline_page_number: int | None = None
     changed_page_number: int | None = None
-    # Audited floor-plan references for the masonry PDF pilot. These are
+    # Audited floor-plan references for visual change review. These are
     # evidence pages, not additional quantity rows or automatic matches.
     baseline_floor_pages: list[int] = Field(default_factory=list)
     changed_floor_pages: list[int] = Field(default_factory=list)
     pdf_highlight_regions: list[DrawingHighlightRegion] = Field(default_factory=list)
+    floor_evidence: list[DrawingFloorEvidence] = Field(default_factory=list)
     pdf_page_status: str = "페이지 근거 확인 필요"
     baseline_revision: str | None = None
     changed_revision: str | None = None

@@ -548,6 +548,10 @@ def _legacy_office_drawing_pdf(discipline: str | None, side: str, bundle: str = 
     paths = {
         ("건축", "baseline"): source_root / "기초자료" / "도면자료" / "광양5-1A-02-DWG-100 사무동 건축기본도면 (Rev.0).pdf",
         ("건축", "changed"): source_root / "변경자료" / "도면자료" / "02. PDF" / "광양5-준공-1A-02-DWG-100_사무동 건축도면_Rev.F.pdf",
+        # 방수 위치는 일반 평면·내역표가 아니라, 기준 상세도 DWG-500의
+        # 화장실 확대도와 변경 DWG-100의 5층 신설 확대도를 사용한다.
+        ("건축", "baseline", "waterproof-plan"): source_root / "기초자료" / "도면자료" / "광양5-1A-02-DWG-500 사무동 건축상세도면 (Rev.0).pdf",
+        ("건축", "changed", "waterproof-plan"): source_root / "변경자료" / "도면자료" / "02. PDF" / "광양5-준공-1A-02-DWG-100_사무동 건축도면_Rev.F.pdf",
         ("구조", "baseline"): source_root / "기초자료" / "도면자료" / "광양5-1S-02-DWG-100 사무동 구조도면 (Rev.0).pdf",
         ("구조", "changed"): source_root / "변경자료" / "도면자료" / "02. PDF" / "광양5-준공-1S-02-DWG-100_사무동 구조도면_Rev.F.pdf",
     }
@@ -555,7 +559,7 @@ def _legacy_office_drawing_pdf(discipline: str | None, side: str, bundle: str = 
     # 사용한다. 이전에는 기준만 DWG-500의 벽체 안내도로 바꿔 표시했는데,
     # 변경 도면의 DWG-201/202 평면도와 동일 종류의 시트가 아니어서
     # 좌표를 보정해도 전후 비교가 성립하지 않았다.
-    path = paths.get((discipline or "", side))
+    path = paths.get((discipline or "", side, bundle)) or paths.get((discipline or "", side))
     return path if path and path.is_file() else None
 
 
@@ -608,6 +612,14 @@ def _legacy_office_drawing_page(discipline: str | None, side: str, drawing_numbe
             return {"1A-201": 10, "1A-202": 11}.get(drawing_number.strip())
         if side == "changed" and drawing_number.startswith("1A-"):
             return {"1A-201": 11, "1A-202": 12}.get(drawing_number.strip())
+    if bundle == "waterproof-plan" and discipline == "건축" and drawing_number:
+        # The waterproof representative is driven by the audited floor
+        # evidence below; this mapping remains useful for direct page lookup.
+        pages = {
+            "baseline": {"1A-801": 24},
+            "changed": {"1A-801": 60, "1A-808": 67, "1A-809": 68},
+        }
+        return pages.get(side, {}).get(drawing_number.strip().upper())
     path = _legacy_office_drawing_pdf(discipline, side, bundle)
     if not path or not drawing_number:
         return None
@@ -693,7 +705,7 @@ def project_drawing_candidate_pdf_preview(
     candidate_id: str,
     side: str = Query(..., pattern="^(baseline|changed)$"),
     page: int = Query(..., ge=1, le=2000),
-    bundle: str = Query(default="main", pattern="^(main|masonry-plan)$"),
+    bundle: str = Query(default="main", pattern="^(main|masonry-plan|waterproof-plan)$"),
     db: Session = Depends(get_db),
     _: Principal = Depends(require_read),
 ):
@@ -1013,6 +1025,61 @@ def _json_payload(value: str | None) -> object:
         return value
 
 
+def _price_lookup_summary(row: ProcurementPriceResult) -> tuple[str, bool]:
+    """Return a safe response summary and whether a retry is useful.
+
+    Raw API bodies are intentionally not sent to the browser because they can
+    contain request metadata.  This extracts only public result/message/count
+    fields and falls back to the persisted lookup status.
+    """
+    status = row.lookup_status or "조회 상태 확인 필요"
+    payload = _json_payload(row.raw_response)
+    if "조회 요청 대기" in status:
+        return "조달청 조회 작업이 진행 중입니다.", False
+    if "대체자료" in status:
+        return "조달청 일치값이 없어 저장된 참고자료 후보로 보완했습니다.", False
+
+    def find_field(value: object, names: set[str]) -> object | None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                normalized = str(key).replace("_", "").replace(" ", "").lower()
+                if normalized in names and child not in (None, ""):
+                    return child
+            for child in value.values():
+                found = find_field(child, names)
+                if found not in (None, ""):
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = find_field(child, names)
+                if found not in (None, ""):
+                    return found
+        return None
+
+    message = ""
+    total_count: object | None = None
+    if isinstance(payload, dict) and payload.get("api_message"):
+        message = str(payload.get("api_message")).strip()
+    message = message or str(find_field(payload, {"resultmsg", "message", "msg", "resultmessage"}) or "").strip()
+    total_count = find_field(payload, {"totalcount", "total", "count"})
+    result_code = find_field(payload, {"resultcode", "code", "statuscode"})
+    if "조회 결과 없음" in status:
+        detail = "조달청 응답은 받았지만 일치 단가가 없습니다."
+        if result_code is not None:
+            detail += f" 응답 코드: {result_code}."
+        if total_count is not None:
+            detail += f" 응답 건수: {total_count}."
+        if message and message not in {"조회 결과 없음", "OK", "정상"}:
+            detail += f" 응답 메시지: {message}"
+        return detail, True
+    if "조회 실패" in status or "권한 오류" in status or "호출 제한" in status:
+        detail = f"{status} 재조회할 수 있습니다."
+        if message:
+            detail += f" 응답 메시지: {message[:180]}"
+        return detail, True
+    return status, False
+
+
 @app.get("/api/v1/projects/{project_id}/preprocessing/runs/{run_id}/records", response_model=list[PreprocessingRecordResponse])
 def preprocessing_records(
     project_id: str,
@@ -1183,7 +1250,11 @@ def project_drawing_candidates(project_id: str, status: str | None = None, limit
         if isinstance(item, dict):
             response = DrawingCandidateResponse.model_validate(item)
             masonry_plan = project_id == "project-g5-office" and response.discipline == "건축" and "조적" in (response.work_package or "")
-            pdf_bundle = "masonry-plan" if masonry_plan else "main"
+            waterproof_plan = project_id == "project-g5-office" and response.discipline == "건축" and "방수" in (response.work_package or "")
+            rc_ramp_plan = project_id == "project-g5-office" and response.discipline == "구조" and response.work_package == "철근콘크리트공사" and response.drawing_number == "1S-701"
+            steel_floor_plan = project_id == "project-g5-office" and response.discipline == "구조" and (response.work_package in ("철골공사", "철근콘크리트공사") or "미분류" in (response.work_package or "")) and response.drawing_number == "1S-301" and re.search(r"5층\s*T\.O\.S", response.candidate_text or "", re.I)
+            steel_bp44_plan = project_id == "project-g5-office" and response.discipline == "구조" and response.work_package == "철골공사" and response.drawing_number == "1S-501" and "BP44" in (response.candidate_text or "")
+            pdf_bundle = "masonry-plan" if masonry_plan else "waterproof-plan" if waterproof_plan else "main"
             baseline_pdf = _legacy_office_drawing_pdf(response.discipline, "baseline", pdf_bundle) if project_id == "project-g5-office" else None
             changed_pdf = _legacy_office_drawing_pdf(response.discipline, "changed", pdf_bundle) if project_id == "project-g5-office" else None
             # Historic office candidates originated from a DXF catalogue, but
@@ -1216,9 +1287,84 @@ def project_drawing_candidates(project_id: str, status: str | None = None, limit
                     "label": "1층 조적 변경 구간 · 121·122실 벽체",
                 },
             ] if masonry_plan else [])
+            # 방수 대표 내역은 5층 신설 구간만 대표 근거로 사용한다.
+            # 1층 증감은 약 0.1㎡ 수준의 미미한 차이이므로 대표 화면에서
+            # 별도 변경 구간으로 과장하지 않는다. 5층은 기준 PDF에 대응
+            # 시트가 없으므로 baseline_page를 비워 다른 층 도면을 대신
+            # 보여주지 않도록 한다.
+            floor_evidence = ([
+                {
+                    "floor": 5,
+                    "label": "5층 신설 화장실",
+                    "baseline_page": None,
+                    "changed_page": 67,
+                    "baseline_sheet": None,
+                    "changed_sheet": "1A-808",
+                    "highlight_regions": [
+                        {
+                            "floor": 5,
+                            "left": "9.0%",
+                            "top": "13.0%",
+                            "width": "30.0%",
+                            "height": "37.0%",
+                            "label": "5층 신설 방수 대표 구간",
+                        },
+                    ],
+                },
+            ] if waterproof_plan else [])
+            if waterproof_plan:
+                baseline_page = None
+                changed_page = 67
+                page_number = changed_page
+                baseline_floor_pages = []
+                changed_floor_pages = [67]
+                pdf_highlight_regions = floor_evidence[0]["highlight_regions"]
+            elif rc_ramp_plan:
+                # 1S-701 p.50의 우측 상단 주출입구·장애인 경사로
+                # 상세에서 레벨/형상 변경이 확인되는 실제 PDF 범위만
+                # 표시한다. CAD 좌표를 PDF 위치로 직접 환산하지 않는다.
+                pdf_highlight_regions = [{
+                    "left": "63.0%",
+                    "top": "13.0%",
+                    "width": "27.0%",
+                    "height": "24.0%",
+                    "label": "주출입구·장애인 경사로 상세 변경 구간",
+                }]
+            elif steel_floor_plan:
+                # 1S-301 입면도에서 기준 4층 상부와 변경 5층 신설
+                # 구조부를 비교한다. 좌표 후보가 아닌 실제 PDF의
+                # 수직 변화 범위만 대표 음영으로 표시한다.
+                pdf_highlight_regions = [{
+                    "left": "18.0%",
+                    "top": "28.0%",
+                    "width": "55.0%",
+                    "height": "16.0%",
+                    "label": "4층 상부 → 5층 신설 구조부",
+                }]
+            elif steel_bp44_plan:
+                # p.44 좌상단의 BP44 상세도에서 SM275 → SS275 규격
+                # 표기가 바뀌는 실제 변경 구간만 표시한다. 철골의 다른
+                # 텍스트 후보에는 위치를 추정해 재사용하지 않는다.
+                pdf_highlight_regions = [{
+                    "left": "10.0%",
+                    "top": "10.0%",
+                    "width": "24.0%",
+                    "height": "38.0%",
+                    "label": "BP44 베이스플레이트 규격 변경 구간",
+                }]
             package_text = response.work_package or ""
             if masonry_plan:
                 pdf_page_status = "동일 층 평면도 비교 · 확인된 대표 변경 구간 음영 표시"
+            elif waterproof_plan:
+                pdf_page_status = "5층 신설 확대도 표시 · 기준 도면 없음"
+            elif rc_ramp_plan:
+                pdf_page_status = "잡배근 상세도 · 경사로 레벨·형상 변경 구간 음영 표시"
+            elif steel_floor_plan:
+                # 철골·철근콘크리트 화면에서 함께 쓰는 구조 변경 후보이므로
+                # 특정 공종으로 오인되지 않도록 공통 구조 근거로 표시한다.
+                pdf_page_status = "구조 입면도 · 4층→5층 신설 구간 음영 표시"
+            elif steel_bp44_plan:
+                pdf_page_status = "동일 시트 비교 · BP44 규격 변경 구간 음영 표시"
             elif "철골" in package_text and baseline_page == 15:
                 pdf_page_status = "철골 구조 입면도 표시"
             elif any(token in package_text for token in ("방수", "타일")) and baseline_page == 4:
@@ -1228,7 +1374,7 @@ def project_drawing_candidates(project_id: str, status: str | None = None, limit
             else:
                 pdf_page_status = "PDF 시트 표시" if baseline_page or changed_page else "PDF 원본 표시"
             return response.model_copy(update={
-                "work_package": response.work_package or PreprocessingReader._drawing_work_package(response.candidate_text or "", response.discipline or ""),
+                "work_package": ("철골공사 · 철근콘크리트공사" if steel_floor_plan else response.work_package or PreprocessingReader._drawing_work_package(response.candidate_text or "", response.discipline or "")),
                 "text_role": response.text_role or drawing_text_role(response.candidate_text),
                 "location_status": response.location_status or ("부위 후보" if drawing_text_role(response.candidate_text) == "부위 표기" else "부위 미확정"),
                 "baseline_file": str(baseline_pdf) if baseline_pdf else response.baseline_file,
@@ -1239,7 +1385,12 @@ def project_drawing_candidates(project_id: str, status: str | None = None, limit
                 "baseline_floor_pages": baseline_floor_pages,
                 "changed_floor_pages": changed_floor_pages,
                 "pdf_highlight_regions": pdf_highlight_regions,
+                "floor_evidence": floor_evidence,
                 "pdf_page_status": pdf_page_status,
+                "drawing_number": ("1A-808" if waterproof_plan else response.drawing_number),
+                "sheet_number": ("1A-808 · 1A-809" if waterproof_plan else "1S-301 · 1S-208" if steel_floor_plan else response.sheet_number),
+                "location_ref": ("5층 신설 화장실 방수 구간" if waterproof_plan else "4층 상부 → 5층 신설 구조부" if steel_floor_plan else response.location_ref),
+                "location_status": ("5층 신설 위치 근거 확인" if waterproof_plan else "4층→5층 신설 구조 근거 확인" if steel_floor_plan else response.location_status or ("부위 후보" if drawing_text_role(response.candidate_text) == "부위 표기" else "부위 미확정")),
             })
         response = DrawingCandidateResponse.model_validate(item, from_attributes=True)
         drawing_number = (item.drawing_number or item.sheet_number or "").strip().lower()
@@ -1383,6 +1534,11 @@ def project_mapping_results(project_id: str, db: Session = Depends(get_db), _: P
 def project_price_results(project_id: str, db: Session = Depends(get_db), _: Principal = Depends(require_read)):
     require_project(project_id, db)
     rows = db.scalars(select(ProcurementPriceResult).where(ProcurementPriceResult.project_id == project_id).order_by(ProcurementPriceResult.created_at.desc())).all()
+    decision_rows = db.scalars(select(PriceApplicationDecision).where(PriceApplicationDecision.project_id == project_id).order_by(PriceApplicationDecision.created_at.desc())).all()
+    latest_decision_by_result: dict[str, PriceApplicationDecision] = {}
+    for decision in decision_rows:
+        if decision.price_result_id and decision.price_result_id not in latest_decision_by_result:
+            latest_decision_by_result[decision.price_result_id] = decision
     # 가격 결과는 DB 조회 이력과 전처리 신규내역 대기열을 함께 보여준다.
     # 79번 대기열은 사무동 전용 산출물이며, 타건물 계약단가 카탈로그와
     # 달리 실제 연결·승인 대상이다. 기존 시드 DB에는 대기열 중 일부만
@@ -1463,6 +1619,18 @@ def project_price_results(project_id: str, db: Session = Depends(get_db), _: Pri
                 return
             seen_comparison_keys.add(comparison_key)
         enrich_reference_match(payload)
+        result_id = str(payload.get("id") or "")
+        decision = latest_decision_by_result.get(result_id)
+        payload["decision"] = decision.decision if decision else "미검토"
+        payload["applied_price"] = float(decision.applied_price) if decision and decision.applied_price is not None else None
+        quantity_value = _reference_number(payload.get("changed_quantity") or payload.get("baseline_quantity"))
+        payload["quantity_for_pricing"] = quantity_value
+        if decision and decision.decision in {"적용 후보", "적용 예정"} and decision.applied_price is not None and quantity_value is not None:
+            payload["provisional_amount"] = round(float(decision.applied_price) * quantity_value, 2)
+            payload["provisional_amount_status"] = "승인 판단 단가 × 검토 수량으로 계산한 잠정금액"
+        else:
+            payload["provisional_amount"] = None
+            payload["provisional_amount_status"] = "구매부서 적용 판단 및 수량 확인 후 계산"
         seen_candidates.add(candidate_id)
         result.append(PriceLookupResponse.model_validate(payload))
 
@@ -1493,11 +1661,15 @@ def project_price_results(project_id: str, db: Session = Depends(get_db), _: Pri
             "specification": row.specification,
             "unit": row.unit,
             "price": float(row.price) if row.price is not None else None,
+            "material_cost": float(row.material_cost) if row.material_cost is not None else None,
+            "labor_cost": float(row.labor_cost) if row.labor_cost is not None else None,
+            "expense_cost": float(row.expense_cost) if row.expense_cost is not None else None,
             "service_name": row.service_name,
             "source_file_id": row.source_file_id,
             "reference_date": row.reference_date,
             "created_at": row.created_at,
         }
+        payload["lookup_detail"], payload["retry_available"] = _price_lookup_summary(row)
         if row.service_name == "기준·변경 대조 전처리" and standardized and source:
             payload["source_set"] = "변경자료 신규내역"
             payload["work_package"] = infer_work_package(standardized.item_name, standardized.specification)
@@ -1729,6 +1901,7 @@ def save_price_decision(project_id: str, result_id: str, request: PriceDecisionR
         decision = PriceApplicationDecision(id=str(uuid4()), project_id=project_id, price_result_id=result_id, price_type="계약단가→유사품목→조달청", decision="미검토")
         db.add(decision)
     decision.decision = request.decision
+    decision.standardized_item_id = result.standardized_item_id
     decision.applied_price = request.applied_price
     decision.reason = request.reason
     decision.approved_by = principal.user_id
@@ -1972,8 +2145,9 @@ def _find_saved_price_reference(db: Session, project_id: str, request: PriceLook
 @app.post("/api/v1/projects/{project_id}/prices/query", response_model=PriceLookupResponse, status_code=202)
 def request_price_lookup(project_id: str, request: PriceLookupRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db), principal: Principal = Depends(require_authenticated)):
     project = require_project(project_id, db)
-    if not principal.is_admin and principal.department != "구매부서":
-        raise HTTPException(403, "조달청 단가 조회는 구매부서 또는 관리자만 요청할 수 있습니다.")
+    # 조회 요청은 모든 인증 사용자에게 허용한다. 품명·규격 후보를
+    # 수집하는 단계와 실제 적용 판단/승인은 분리되어 있으며, 적용 판단은
+    # 아래 decision API에서 계속 구매부서 또는 관리자만 수행한다.
     candidate_id = request.candidate_id or f"API-{uuid4().hex[:12].upper()}"
     saved_reference = _find_saved_price_reference(db, project.id, request)
     if saved_reference:
@@ -2007,4 +2181,30 @@ def request_price_lookup(project_id: str, request: PriceLookupRequest, backgroun
     db.refresh(result)
     if not saved_reference:
         background_tasks.add_task(execute_price_lookup, result.id)
-    return PriceLookupResponse.model_validate(result, from_attributes=True)
+    response = PriceLookupResponse.model_validate(result, from_attributes=True)
+    response.lookup_detail = "조달청 조회 요청이 접수되었습니다. 결과 수신 후 적용 판단이 필요합니다." if not saved_reference else "저장된 참고단가 후보가 생성되었습니다. 자동 적용되지 않습니다."
+    response.retry_available = False
+    return response
+
+
+@app.post("/api/v1/projects/{project_id}/prices/{result_id}/retry", response_model=PriceLookupResponse, status_code=202)
+def retry_price_lookup(project_id: str, result_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db), _: Principal = Depends(require_authenticated)):
+    """Re-run a completed/failed API lookup without changing any decision."""
+    require_project(project_id, db)
+    record = db.scalar(select(ProcurementPriceResult).where(ProcurementPriceResult.project_id == project_id, ProcurementPriceResult.id == result_id))
+    if not record:
+        raise HTTPException(status_code=404, detail="단가 조회 후보를 찾을 수 없습니다.")
+    if record.price is not None:
+        raise HTTPException(status_code=409, detail="이미 단가가 있는 후보는 재조회할 수 없습니다. 기존 후보를 검토하세요.")
+    if "조회 요청 대기" in (record.lookup_status or ""):
+        raise HTTPException(status_code=409, detail="이미 조회 작업이 진행 중입니다.")
+    record.lookup_status = "조회 요청 대기"
+    record.raw_response = None
+    record.reference_date = None
+    db.commit()
+    background_tasks.add_task(execute_price_lookup, record.id)
+    db.refresh(record)
+    response = PriceLookupResponse.model_validate(record, from_attributes=True)
+    response.lookup_detail = "재조회 요청이 접수되었습니다. 결과 수신 후 적용 판단이 필요합니다."
+    response.retry_available = False
+    return response

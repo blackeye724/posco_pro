@@ -8,7 +8,7 @@ import { currentUserId, PROJECT_ID, USER_ID } from "./api";
 type NavIconName = "dashboard" | "review" | "upload" | "drawings" | "quantities" | "prices" | "approvals" | "history" | "chat";
 type NavItem = [string, string, NavIconName];
 const navigationGroups: { label: string; items: NavItem[] }[] = [
-  { label: "검토", items: [["/", "검토 홈", "dashboard"], ["/review", "확인 요청함", "review"], ["/quantities", "최초 자료 검토", "quantities"], ["/drawings", "설계변경 검토", "drawings"], ["/prices", "신규내역 단가 검토", "prices"]] },
+  { label: "검토", items: [["/", "검토 대시보드", "dashboard"], ["/review", "검토 대상 목록", "review"], ["/quantities", "최초 자료 검토", "quantities"], ["/drawings", "설계변경 검토", "drawings"], ["/prices", "신규내역 단가 검토", "prices"]] },
   { label: "자료·승인", items: [["/upload", "자료 업로드·회차", "upload"], ["/approvals", "승인 대기열", "approvals"], ["/history", "검토 이력", "history"]] },
   { label: "도움", items: [["/chat", "검토 챗봇", "chat"]] },
 ];
@@ -27,7 +27,7 @@ function NavIcon({ name }: { name: NavIconName }) {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><circle {...common} cx="12" cy="8" r="3" /><path {...common} d="M5 21v-2a5 5 0 0 1 10 0v2M17 12h4M19 10v4" /></svg>;
 }
 
-export function AppShell({ children, eyebrow, title }: { children: React.ReactNode; eyebrow: string; title: string }) {
+export function AppShell({ children, eyebrow, title, className = "" }: { children: React.ReactNode; eyebrow: string; title: string; className?: string }) {
   const pathname = usePathname();
   const router = useRouter();
   const [userId, setUserId] = useState(USER_ID);
@@ -70,7 +70,7 @@ export function AppShell({ children, eyebrow, title }: { children: React.ReactNo
       </nav>
       <div className="sidebar-note"><strong>자동 확정 금지</strong><p>수량·금액·단가는 담당 부서 승인 전까지 검토 후보로만 표시됩니다.</p></div>
     </aside>
-    <section className="content"><header className="page-header"><div><p className="eyebrow">프로젝트 현황 / {eyebrow}</p><h1>{title}</h1></div><div className="header-meta"><span className="status-dot" />승인 대기 유지<span className="user-chip">{displayName || userId} · {department || "검토자"}</span><button type="button" className="logout-button" onClick={logout}>로그아웃</button></div></header>{children}</section>
+    <section className={`content ${className}`.trim()}><header className="page-header"><div><p className="eyebrow">프로젝트 현황 / {eyebrow}</p><h1>{title}</h1></div><div className="header-meta"><span className="status-dot" />승인 대기 유지<span className="user-chip">{displayName || userId} · {department || "검토자"}</span><button type="button" className="logout-button" onClick={logout}>로그아웃</button></div></header>{children}</section>
   </main>;
 }
 

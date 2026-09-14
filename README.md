@@ -77,6 +77,53 @@ docker compose exec api python scripts/seed_sample.py
 
 종료는 `docker compose down`입니다. 데이터베이스 볼륨까지 지우려면 명시적으로 `docker compose down -v`를 사용합니다.
 
+## Vercel·운영 API 배포 환경변수
+
+웹과 FastAPI는 서로 다른 실행환경으로 배포합니다. Vercel에는 `frontend`를 연결하고, FastAPI·PostgreSQL·업로드 저장소는 별도 백엔드 호스트에 둡니다. Vercel의 `NEXT_PUBLIC_API_BASE_URL`에는 백엔드의 공개 HTTPS 주소와 `/api/v1`을 지정합니다.
+
+백엔드에만 다음 변수를 등록합니다.
+
+| 변수 | 용도 | 공개 범위 |
+|---|---|---|
+| `DATABASE_URL` | 운영 PostgreSQL 연결 | 백엔드 전용 |
+| `AUTH_REQUIRED=true` | 인증 강제 | 백엔드 전용 |
+| `CORS_ORIGINS` | Vercel 웹 주소 허용 | 백엔드 전용 |
+| `PRICE_API_URL` | 조달청 PriceInfoService 엔드포인트 | 백엔드 전용 |
+| `PRICE_API_KEY` | 조달청 API 인증키 | 백엔드 전용·`NEXT_PUBLIC_*` 금지 |
+| `PUBLIC_DATA_SERVICE_KEY` | 이전 전처리·PoC에서 사용한 인증키 변수명(호환) | 백엔드 전용·`NEXT_PUBLIC_*` 금지 |
+| `PRICE_API_OPERATION` | PriceInfoService operation(기본: 건축 시장시공가격) | 백엔드 전용 |
+| `PUBLIC_DATA_SERVICE_URL` | 이전 실행기의 엔드포인트를 그대로 사용할 때(선택) | 백엔드 전용 |
+| `PRICE_API_SERVICE_NAME` | 화면에 표시할 서비스명(선택) | 백엔드 전용 |
+| `PRICE_REFERENCE_CSV` | 참고단가 CSV 경로(선택) | 백엔드 전용 |
+
+Vercel 프로젝트에는 다음 공개 변수만 등록합니다.
+
+| 변수 | 예시 |
+|---|---|
+| `NEXT_PUBLIC_API_BASE_URL` | `https://api.example.com/api/v1` |
+| `NEXT_PUBLIC_PROJECT_ID` | `project-g5-office` |
+| `NEXT_PUBLIC_USER_ID` | `pfc391` (MVP 기본 계정) |
+
+배포 후에는 (1) `/health` 응답 확인, (2) 인증된 어느 계정에서든 단가 조회 요청, (3) 저장 참고단가가 없는 대표 품목 1건의 `조회 완료` 또는 추적 가능한 오류 상태 확인, (4) 구매부서 `적용 후보` 판단 후 잠정금액 계산을 순서대로 실행합니다. 조회 후보 수집은 모든 인증 사용자에게 허용하지만, 단가 적용 판단은 구매부서 또는 관리자만 수행합니다. URL·키 중 하나라도 빠지면 API를 호출하지 않고 `조회 보류`로 남으며, 저장 참고단가·공식 CSV 우선순위는 그대로 유지됩니다.
+
+외부 API 호출 전에는 백엔드에서 아래 명령으로 키 값 없이 설정 상태만 확인할 수 있습니다. `--dry-run`을 빼면 설정이 완전할 때만 대표 품목 1건을 호출하며, DB에는 저장하지 않습니다.
+
+```powershell
+cd backend
+.venv\Scripts\python.exe scripts/price_api_smoke.py --dry-run
+# 실제 키가 설정된 환경에서만
+.venv\Scripts\python.exe scripts/price_api_smoke.py --item "철근콘크리트용봉강" --unit "TON"
+```
+
+스모크 결과는 키 값을 출력하지 않고 `api_key_configured`, `lookup_status`,
+`price_found`만 확인할 수 있게 되어 있습니다. PowerShell의 `$env:` 설정은
+해당 창에만 유효하므로 다른 터미널에서 실행하면 키가 보이지 않습니다.
+실제 키는 화면·로그·저장소에 붙여 넣지 마세요.
+
+단위 표기가 API 원문과 달라 1차 결과가 없으면 서버가 단위를 제외한 2차
+조회까지 자동으로 시도합니다. 그래도 결과가 없으면 단가를 임의 적용하지
+않고 `조회 결과 없음` 상태로 남깁니다.
+
 ## 로컬 개발 실행
 
 PostgreSQL을 먼저 실행하고 `DATABASE_URL` 및 `UPLOAD_DIR`을 설정합니다. `PREPROCESSING_DIR`은 일반 원본 업로드 흐름에는 필요하지 않으며, 관리자용 기존 전처리 결과 가져오기·회귀검증을 사용할 때만 설정합니다.
@@ -176,7 +223,7 @@ pytest -q tests
 - `POST /api/v1/projects/{project_id}/rules/run`: 긴 규칙 실행을 비동기 작업으로 접수(202)
 - `GET /api/v1/jobs/{job_id}`: 비동기 작업 상태
 - `GET /api/v1/prices`: 신규내역 및 PriceInfoService 재조회 대기열
-- `POST /api/v1/projects/{project_id}/prices/query`: 조달청 단가 조회 요청(202)
+- `POST /api/v1/projects/{project_id}/prices/query`: 인증 사용자 조달청 단가 조회 요청(202; 적용 판단 권한과 분리)
 - `POST /api/v1/projects/{project_id}/reviews/{source_id}/approvals`: 부서 승인 처리
 - `POST /api/v1/projects/{project_id}/reviews/approvals/batch`: 동일 단계 선택 항목 일괄 승인·반려·수정 요청(항목별 성공·실패 결과)
 - `POST /api/v1/projects/{project_id}/reports`: 동일 검토 스냅샷의 PDF·Excel·근거 Manifest 패키지 생성(202)
@@ -236,4 +283,6 @@ MVP 공식 승인·보관 결과물은 상세 Excel, 요약 PDF, 원본 근거 M
 ## 다음 확장 단계
 
 단가 검토는 동일 프로젝트 타건물의 승인 참고단가를 먼저 확인하고, 공식 조달청 CSV·표준시장단가가 있으면 조달청 API보다 먼저 검토 후보로 사용합니다. 두 자료가 모두 없을 때만 PriceInfoService API를 조회합니다. 모든 후보는 구매부서 승인 전 자동 확정하지 않으며 출처·기준일·적용 사유를 기록합니다. 관리자가 `price-references/import`를 실행하면 CSV의 품명·표준품명·규격·단위·건물·단가·출처·제한사항이 `price_reference_catalog`에 저장됩니다. 동일 프로젝트의 다른 건물에서 일치하는 내역은 신규내역 단가 후보로 제안할 수 있지만 구매부서 승인 전 자동 확정하지 않습니다. 다른 프로젝트 단가는 출처 프로젝트·건물·기준일을 표시하는 참고자료로만 조회하며 자동 후보 적용하지 않습니다. 후속 단계에서는 PDF OCR 고도화, DWG 객체·좌표 비교 worker, 인증된 PriceInfoService 재조회를 연결합니다. 정상 운영의 기본 경로는 원본 업로드→비동기 전처리→규칙 검토이며, 기존 전처리 결과는 관리자용 보조 경로로 유지합니다.
+
+단가 적용은 조회값을 원본 내역서에 덮어쓰지 않는 2단계 방식으로 운영합니다. 구매부서가 후보를 `적용 예정`으로 판단하면 적용단가와 사유를 별도 결정 이력에 저장하고, 변경자료의 검토 수량이 있을 때만 `검토 수량 × 적용단가`를 잠정금액으로 계산해 표시합니다. 원본 단가·금액은 보존하며, 최종 확정은 별도 승인 이후에만 가능합니다. API 응답은 적용단가를 우선하고 재료비·노무비·경비 구성값을 함께 보존해 서비스별 응답 형식 차이에 대비합니다.
 참고단가 CSV는 기본적으로 `PREPROCESSING_DIR/15_타건물_기계약단가_참고.csv`에서 읽으며, 운영 환경에서 별도 위치를 사용할 때는 `PRICE_REFERENCE_CSV` 환경변수로 명시할 수 있습니다. 파일이 없으면 신규내역은 `참고단가 미확인` 상태로 남고 자동 적용되지 않습니다.

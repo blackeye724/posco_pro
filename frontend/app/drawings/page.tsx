@@ -24,8 +24,8 @@ function shortFileName(path?: string) {
   return path.split(/[\\/]/).pop() || path;
 }
 
-function pdfPageRef(page?: number) {
-  return page ? `PDF p.${page}` : "PDF 페이지 확인 필요";
+function pdfPageRef(page?: number, missingLabel = "PDF 페이지 확인 필요") {
+  return page ? `PDF p.${page}` : missingLabel;
 }
 
 type HighlightRegion = { left: string; top: string; width: string; height: string; label: string };
@@ -132,7 +132,7 @@ function stoneDrawingPriority(candidate: DrawingCandidate) {
   return 4;
 }
 
-function insulationDrawingPriority(candidate: DrawingCandidate) {
+  function insulationDrawingPriority(candidate: DrawingCandidate) {
   const sheet = candidate.drawing_number || candidate.sheet_number || "";
   const text = candidate.candidate_text || "";
   if (sheet === "1A-701" && /90\s*(?:mm|㎜)?[^\n]*압출법보온판/.test(text)) return 0;
@@ -141,6 +141,32 @@ function insulationDrawingPriority(candidate: DrawingCandidate) {
   if (/단열재/.test(text)) return 3;
   if (/완충스티로폼/.test(text)) return 4;
   return 4;
+}
+
+function steelDrawingPriority(candidate: DrawingCandidate) {
+  const sheet = candidate.drawing_number || candidate.sheet_number || "";
+  const text = candidate.candidate_text || "";
+  const isBp44 = /^BP44\s*:/i.test(text) && /PL-240x240x22t/i.test(text);
+  if (sheet === "1S-301" && /5층\s*T\.O\.S/i.test(text) && /추가 후보|변경/.test(candidate.change_type || "")) return 0;
+  if (sheet === "1S-301" && /5층\s*T\.O\.S/i.test(text)) return 1;
+  // 같은 BP44에 삭제/추가 후보가 함께 있으므로, 변경 후 규격을
+  // 담은 추가행을 대표로 먼저 보여준다. 기준 SM275 삭제행은
+  // 비교 목록에서 계속 확인할 수 있다.
+  if (sheet === "1S-501" && isBp44 && /추가 후보|변경/.test(candidate.change_type || "")) return 2;
+  if (sheet === "1S-501" && isBp44) return 3;
+  if (sheet === "1S-501" && /BP44/i.test(text)) return 4;
+  if (sheet === "1S-501") return 5;
+  return 6;
+}
+
+function reinforcedConcreteDrawingPriority(candidate: DrawingCandidate) {
+  const sheet = candidate.drawing_number || candidate.sheet_number || "";
+  const text = candidate.candidate_text || "";
+  if (sheet === "1S-301" && /5층\s*T\.O\.S/i.test(text)) return 0;
+  if (sheet === "1S-701" && /HD10@200-T&B|HD13@300/.test(text)) return 1;
+  if (sheet === "1S-701") return 1;
+  if (sheet === "1S-401") return 2;
+  return 3;
 }
 
 function quantityText(value?: string | null) {
@@ -523,9 +549,19 @@ function DrawingPreview({ changed }: { changed: boolean }) {
   </svg>;
 }
 
-function SourcePdfPreview({ url, pageNumber, changed, exactPage, highlightRegions = [] }: { url: string | null; pageNumber?: number; changed: boolean; exactPage?: boolean; highlightRegions?: HighlightRegion[] }) {
+function SourcePdfPreview({ url, pageNumber, changed, exactPage, highlightRegions = [], highlightTone = "masonry", highlightLegend = "파란 음영 · 대표 변경 구간" }: { url: string | null; pageNumber?: number; changed: boolean; exactPage?: boolean; highlightRegions?: HighlightRegion[]; highlightTone?: "masonry" | "waterproof-existing" | "waterproof-new"; highlightLegend?: string }) {
   if (!url) return <div className={`cad-pdf-loading ${changed ? "changed" : "baseline"}`}><b>등록된 PDF 원본을 찾지 못했습니다</b><small>합성 도면으로 대체하지 않습니다. 원본 자료 화면에서 파일 연결을 확인하세요.</small></div>;
-  return <div className="cad-pdf-preview"><div className="cad-pdf-figure">{exactPage ? <div className="cad-pdf-canvas"><img src={url} alt={`${changed ? "변경" : "기준"} PDF 페이지 미리보기`} />{changed && highlightRegions.length > 0 && <div className="cad-pdf-highlights" aria-label="전처리 변경 구간 음영 표시">{highlightRegions.map(region => <span key={`${region.left}-${region.top}`} className="cad-pdf-highlight masonry" style={{ left: region.left, top: region.top, width: region.width, height: region.height }}>{region.label && <b>{region.label}</b>}</span>)}</div>}</div> : <iframe src={`${url}#page=${pageNumber || 1}&view=FitH`} title={changed ? "변경 원본 PDF" : "기준 원본 PDF"} />}{changed && exactPage && highlightRegions.length > 0 && <strong className="cad-pdf-highlight-legend masonry">파란 음영 · 대표 조적 변경 구간</strong>}</div><small>등록 원본 PDF · {exactPage ? "정확한 층별 시트 연결" : "페이지 자동 매칭 전 1페이지"}{changed && exactPage && highlightRegions.length > 0 ? " · 대표 변경 구간 표시" : ""}</small></div>;
+  const resolvedLegend = highlightTone === "waterproof-existing"
+    ? "파란 음영 · 1층 방수 변경 비교 구간"
+    : highlightTone === "waterproof-new"
+      ? "주황 음영 · 5층 신설 방수 구간"
+      : highlightLegend;
+  const resolvedCaption = highlightTone === "waterproof-existing" ? "변경 비교 구간 표시" : "대표 변경 구간 표시";
+  return <div className="cad-pdf-preview"><div className="cad-pdf-figure">{exactPage ? <div className="cad-pdf-canvas"><img src={url} alt={`${changed ? "변경" : "기준"} PDF 페이지 미리보기`} />{changed && highlightRegions.length > 0 && <div className="cad-pdf-highlights" aria-label="전처리 변경 구간 음영 표시">{highlightRegions.map(region => <span key={`${region.left}-${region.top}`} className={`cad-pdf-highlight ${highlightTone}`} style={{ left: region.left, top: region.top, width: region.width, height: region.height }}>{region.label && <b>{region.label}</b>}</span>)}</div>}</div> : <iframe src={`${url}#page=${pageNumber || 1}&view=FitH`} title={changed ? "변경 원본 PDF" : "기준 원본 PDF"} />}{changed && exactPage && highlightRegions.length > 0 && <strong className={`cad-pdf-highlight-legend ${highlightTone}`}>{resolvedLegend}</strong>}</div><small>등록 원본 PDF · {exactPage ? "정확한 층별 시트 연결" : "페이지 자동 매칭 전 1페이지"}{changed && exactPage && highlightRegions.length > 0 ? ` · ${resolvedCaption}` : ""}</small></div>;
+}
+
+function MissingFloorPreview({ label }: { label: string }) {
+  return <div className="cad-pdf-loading baseline cad-pdf-missing-floor"><b>기준 도면에 {label} 없음</b><small>변경 도면에서 신설된 층이므로, 다른 층 도면으로 대체하지 않습니다.</small></div>;
 }
 
 function PdfLoadingPreview({ changed }: { changed: boolean }) {
@@ -562,12 +598,15 @@ export default function DrawingsPage() {
   const [comparisons, setComparisons] = useState<BaselineChangedComparison[]>([]);
   const [comparisonLoading, setComparisonLoading] = useState(true);
   const [showCandidateList, setShowCandidateList] = useState(false);
+  const [showSupportingPdf, setShowSupportingPdf] = useState(false);
   const [catalogHydrating, setCatalogHydrating] = useState(false);
   // 도면 검토의 기준은 CAD 렌더링이 아니라 등록된 PDF 원본이다.
   // 조적공사처럼 PDF로 검토했던 공종이 DWG 텍스트 요약으로 바뀌지 않도록
   // 모든 후보에서 PDF를 기본으로 연다.
   const [showPdf, setShowPdf] = useState(true);
   const [masonryFloor, setMasonryFloor] = useState<1 | 2>(1);
+  // 방수 대표 화면은 1층의 미미한 증감이 아니라 5층 신설 근거만 표시한다.
+  const waterproofFloor = 5 as const;
 
   useEffect(() => {
     const query = new URLSearchParams(window.location.search);
@@ -641,7 +680,10 @@ export default function DrawingsPage() {
     return (dataScope === "전체" || originFor(item) === dataScope) && packageMatches && (textRole === "전체" || (item.text_role || "부위 미확정") === textRole) && (locationStatus === "전체" || locationBucketFor(item) === locationStatus);
   });
   const renderedItems = filteredItems.slice(0, 60);
-  const primaryCandidate = [...filteredItems].filter(item => item.work_package && !item.work_package.includes("미분류")).sort((left, right) => {
+  const explicitFloorCandidate = (workPackage === "철골공사" || workPackage === "철근콘크리트공사")
+    ? filteredItems.find(item => item.discipline === "구조" && item.drawing_number === "1S-301" && /5층\s*T\.O\.S/i.test(item.candidate_text || ""))
+    : undefined;
+  const primaryCandidate = explicitFloorCandidate || [...filteredItems].filter(item => item.work_package && !item.work_package.includes("미분류")).sort((left, right) => {
     // 공종 필터가 지정되면 복합 공종 후보보다 해당 공종 단독 후보를
     // 우선한다. 그래야 방수 화면에 조적 대표 내역이 섞이지 않는다.
     if (workPackage !== "전체") {
@@ -663,6 +705,16 @@ export default function DrawingsPage() {
       const leftInsulationPriority = insulationDrawingPriority(left);
       const rightInsulationPriority = insulationDrawingPriority(right);
       if (leftInsulationPriority !== rightInsulationPriority) return leftInsulationPriority - rightInsulationPriority;
+    }
+    if (workPackage === "철골공사") {
+      const leftSteelPriority = steelDrawingPriority(left);
+      const rightSteelPriority = steelDrawingPriority(right);
+      if (leftSteelPriority !== rightSteelPriority) return leftSteelPriority - rightSteelPriority;
+    }
+    if (workPackage === "철근콘크리트공사") {
+      const leftRcPriority = reinforcedConcreteDrawingPriority(left);
+      const rightRcPriority = reinforcedConcreteDrawingPriority(right);
+      if (leftRcPriority !== rightRcPriority) return leftRcPriority - rightRcPriority;
     }
     const workPackagePriority = summaryPriority(left.work_package) - summaryPriority(right.work_package);
     if (workPackagePriority) return workPackagePriority;
@@ -732,7 +784,14 @@ export default function DrawingsPage() {
     status: "대표 수량 요약",
     confidence: "중간",
   } as DrawingCandidate : undefined);
-  const selectedComparison = selected ? representativeComparison(selected, comparisons) : (doorSummary || activeScaffoldSummary || activePanelSummary || activeGutterSummary || activeElevatorSummary);
+  // 복합 공종 후보(예: 철골공사 · 철근콘크리트공사)는 현재 선택한
+  // 공종의 대표 물량을 우선 조회한다. 그렇지 않으면 철근콘크리트 화면에서
+  // 5층 구조 후보가 철골 대표 내역으로 잘못 표시될 수 있다.
+  const comparisonCandidate = selected && workPackage !== "전체" && workPackageParts(selected.work_package).includes(workPackage)
+    ? { ...selected, work_package: workPackage }
+    : selected;
+  const selectedComparison = comparisonCandidate ? representativeComparison(comparisonCandidate, comparisons) : (doorSummary || activeScaffoldSummary || activePanelSummary || activeGutterSummary || activeElevatorSummary);
+  const summaryTrade = workPackage === "전체" ? displayWorkPackage(summaryCandidate?.work_package) : workPackage;
   if (summaryCandidate && selectedComparison?.item_key === "승객용엘리베이터사양변경") {
     // 실제 PDF 후보가 있더라도 대표 카드는 삭제 후보가 아닌 사양 전환을
     // 우선 설명하도록 표시 문구를 대표 수량 기준으로 보정한다.
@@ -742,34 +801,94 @@ export default function DrawingsPage() {
   // 일반 단어만 겹친 경우를 도면-내역 직접 연결로 오인하지 않는다.
   const selectedItemRelated = Boolean(selectedComparison && selected && !selectedComparison.representative_source_rows?.length && textMatchScore(selected.candidate_text, selectedComparison.item_text) >= 3);
   const masonryPlan = Boolean(selected?.discipline === "건축" && (workPackage === "전체" || workPackage === "조적공사") && selected?.work_package?.includes("조적"));
-  const pdfBundle = masonryPlan ? "masonry-plan" : "main";
+  const waterproofPlan = Boolean(selected?.discipline === "건축" && (workPackage === "전체" || workPackage === "방수공사") && selected?.work_package?.includes("방수"));
+  const steelFloorPlan = Boolean(selected?.discipline === "구조" && selected?.drawing_number === "1S-301" && /5층\s*T\.O\.S/i.test(selected?.candidate_text || ""));
+  const rcRampPlan = Boolean(selected?.discipline === "구조" && selected?.work_package === "철근콘크리트공사" && selected?.drawing_number === "1S-701");
+  // 5층 구조 변경을 보는 중에도 기존에 확인했던 RC 경사로 상세도를
+  // 보조 근거로 펼쳐볼 수 있게 연결한다. 주 도면(1S-301)은 유지하고,
+  // 필요할 때만 이전 자료를 열어 화면이 불필요하게 길어지지 않게 한다.
+  const rcRampSupportingCandidate = workPackage === "철근콘크리트공사" && steelFloorPlan
+    ? items.find(item => item.discipline === "구조" && item.work_package === "철근콘크리트공사" && item.drawing_number === "1S-701" && /HD10@200-T&B/.test(item.candidate_text || ""))
+    : undefined;
+  const rcRampSupportingPage = rcRampSupportingCandidate?.baseline_page_number || rcRampSupportingCandidate?.page_number;
+  const rcRampSupportingChangedPage = rcRampSupportingCandidate?.changed_page_number || rcRampSupportingCandidate?.page_number;
+  const rcRampSupportingBaselineUrl = rcRampSupportingCandidate?.id && rcRampSupportingPage
+    ? drawingPdfPreviewUrl(PROJECT_ID, rcRampSupportingCandidate.id, "baseline", rcRampSupportingPage, "main")
+    : null;
+  const rcRampSupportingChangedUrl = rcRampSupportingCandidate?.id && rcRampSupportingChangedPage
+    ? drawingPdfPreviewUrl(PROJECT_ID, rcRampSupportingCandidate.id, "changed", rcRampSupportingChangedPage, "main")
+    : null;
+  const rcRampSupportingHighlights = (rcRampSupportingCandidate?.pdf_highlight_regions || []).map(region => ({
+    left: region.left,
+    top: region.top,
+    width: region.width,
+    height: region.height,
+    label: region.label || "경사로 변경 구간",
+  }));
+  const pdfBundle = masonryPlan ? "masonry-plan" : waterproofPlan ? "waterproof-plan" : "main";
   const masonryFloorPages = masonryPlan && selected
     ? { baseline: selected.baseline_floor_pages?.[masonryFloor - 1], changed: selected.changed_floor_pages?.[masonryFloor - 1] }
     : { baseline: undefined, changed: undefined };
-  const baselinePdfPage = masonryFloorPages.baseline || selected?.baseline_page_number || selected?.page_number;
-  const changedPdfPage = masonryFloorPages.changed || selected?.changed_page_number || selected?.page_number;
+  const waterproofEvidence = waterproofPlan ? selected?.floor_evidence?.find(item => item.floor === waterproofFloor) : undefined;
+  const baselinePdfPage = masonryPlan
+    ? masonryFloorPages.baseline
+    : waterproofPlan
+      ? (waterproofEvidence?.baseline_page || undefined)
+      : selected?.baseline_page_number || selected?.page_number;
+  const changedPdfPage = masonryPlan
+    ? masonryFloorPages.changed
+    : waterproofPlan
+      ? (waterproofEvidence?.changed_page || undefined)
+      : selected?.changed_page_number || selected?.page_number;
   const baselinePreviewUrl = selected?.id && baselinePdfPage ? drawingPdfPreviewUrl(PROJECT_ID, selected.id, "baseline", baselinePdfPage, pdfBundle) : baselinePdfUrl;
   const changedPreviewUrl = selected?.id && changedPdfPage ? drawingPdfPreviewUrl(PROJECT_ID, selected.id, "changed", changedPdfPage, pdfBundle) : changedPdfUrl;
-  const canComparePdfPages = Boolean((baselinePdfPage || showPdf) && baselinePreviewUrl && changedPreviewUrl);
-  const pdfExactPage = Boolean(masonryPlan || selected?.page_number);
+  const canComparePdfPages = Boolean(baselinePreviewUrl || changedPreviewUrl);
+  const pdfExactPage = Boolean(masonryPlan || waterproofPlan || selected?.page_number);
   // 음영 좌표는 화면에서 추정하지 않고 전처리 응답에 저장된 PDF 기준
   // 좌표만 사용한다. 층이 일치하지 않는 좌표는 버려서 다른 층의 위치가
   // 재사용되지 않도록 한다.
-  const pdfHighlightRegions: HighlightRegion[] = masonryPlan
-    ? (selected?.pdf_highlight_regions || [])
-        .filter(region => region.floor == null || region.floor === masonryFloor)
-        .map(region => ({
-          left: region.left,
-          top: region.top,
-          width: region.width,
-          height: region.height,
-          label: region.label || "변경 구간",
-        }))
-    : [];
+  const pdfHighlightRegions: HighlightRegion[] = (masonryPlan || waterproofPlan
+    ? (waterproofPlan ? (waterproofEvidence?.highlight_regions || []) : (selected?.pdf_highlight_regions || []))
+    : (selected?.pdf_highlight_regions || []))
+      .filter(region => region.floor == null || region.floor === (waterproofPlan ? waterproofFloor : masonryFloor))
+      .map(region => ({
+        left: region.left,
+        top: region.top,
+        width: region.width,
+        height: region.height,
+        label: region.label || "변경 구간",
+      }));
+  const pdfHighlightLegend = waterproofPlan
+    ? "주황 음영 · 5층 신설 방수 구간"
+    : masonryPlan
+      ? "파란 음영 · 대표 조적 변경 구간"
+      : steelFloorPlan
+        ? "파란 음영 · 4층 상부→5층 신설 구조부"
+        : rcRampPlan
+          ? "파란 음영 · 주출입구·장애인 경사로 변경 구간"
+        : selected?.work_package === "철골공사" && pdfHighlightRegions.length
+          ? "파란 음영 · BP44 규격 변경 구간"
+        : "파란 음영 · 대표 변경 구간";
   const masonryLocationMessage = masonryFloor === 1
     ? "1층은 121·122실 주변 조적 변경 구간을 파란 음영으로 표시합니다."
     : "2층은 현재 확인된 대표 변경 구간이 없어 음영을 표시하지 않습니다.";
-  const displayDrawingNumber = masonryPlan ? `DWG-${masonryFloor === 1 ? "201" : "202"} · ${masonryFloor}층 평면도` : (selected?.drawing_number || selected?.sheet_number || "도면번호 미지정");
+  const waterproofLocationMessage = "5층은 변경 도면에 새로 생긴 화장실 방수 구간을 주황 음영으로 표시합니다.";
+  const displayDrawingNumber = masonryPlan
+    ? `DWG-${masonryFloor === 1 ? "201" : "202"} · ${masonryFloor}층 평면도`
+    : waterproofPlan
+      ? "1A-808 · 5층 화장실 확대도"
+      : steelFloorPlan
+        ? "1S-301 · 4층→5층 구조 입면"
+      : rcRampPlan
+        ? "1S-701 · 주출입구·장애인 경사로 상세"
+      : (selected?.drawing_number || selected?.sheet_number || "도면번호 미지정");
+  const displayLocationRef = waterproofPlan
+    ? "5층 신설 화장실 방수 구간"
+    : steelFloorPlan
+      ? "4층 상부 → 5층 신설 구조부"
+    : rcRampPlan
+      ? "주출입구·장애인 경사로 레벨·형상 변경 구간"
+    : (selected?.location_ref || "확인 필요");
   const pdfPageStatus = selected?.pdf_page_status
     ?.replace("감사 완료", "표시")
     ?.replace("페이지 근거 확인 필요", "PDF 원본 표시") || "PDF 원본 표시";
@@ -801,6 +920,7 @@ export default function DrawingsPage() {
   useEffect(() => {
     setShowPdf(true);
     setMasonryFloor(1);
+    setShowSupportingPdf(false);
   }, [selected?.id]);
 
   return <AppShell eyebrow="DRAWING CHANGE REVIEW" title="도면 변경부위 검토">
@@ -808,17 +928,21 @@ export default function DrawingsPage() {
     <WorkflowStepper current="change" />
     <p className="lead">기준·변경 PDF를 나란히 보고, 전처리된 변경 표기와 대표 물량 변화를 함께 확인합니다. 이 화면은 승인 판정이 아니라 공종별 변경 내용을 빠르게 파악하기 위한 검토 지원 화면입니다.</p>
     <div className="cad-location-guide"><span><b>자동 위치 후보 가능</b> 좌표 정렬이 가능한 후보</span><span><b>위치 후보</b> 시트·좌표는 있으나 범위 차이로 추가 확인 필요</span><span><b>부위 미확정</b> 텍스트만 있고 위치를 확정하지 않음</span></div>
-    {!loading && <section className="panel drawing-change-summary"><div className="panel-head"><div><p className="eyebrow">TRADE CHANGE SUMMARY</p><h2>{workPackage === "전체" ? "대표 변경 1건" : `${workPackage} 대표 변경`}</h2><small className="muted-line">공사단위를 선택하면 해당 공종의 대표 내역 1건만 표시합니다. 먼저 변경 구간과 기준·변경 물량을 확인하고, PDF는 해당 내용을 이해하기 위한 화면 자료로 활용합니다.</small></div><span className="review-only">검토 지원</span></div><div className="drawing-review-status"><span className="drawing-status-ok"><b>검토 정보</b> 대표 내역·변경 구간·기준/변경 수량</span><span className="drawing-status-pending"><b>참고</b> 도면 표기와 물량을 함께 보고 판단</span></div>{comparisonLoading ? <p className="muted-line">대표 물량 변화를 불러오는 중입니다…</p> : summaryCandidate && selectedComparison ? <div className="drawing-change-summary-single"><div><span className="drawing-change-card-trade">{displayWorkPackage(summaryCandidate.work_package)}</span><strong>{selectedComparison.item_text}</strong><span className="drawing-change-location">{drawingReferenceLabel(summaryCandidate, workPackage === "전체" ? displayWorkPackage(summaryCandidate.work_package) : workPackage)} · {summaryCandidate.change_type || "변경 후보"} · {candidateTextForTrade(summaryCandidate, workPackage === "전체" ? displayWorkPackage(summaryCandidate.work_package) : workPackage)}</span></div><div className="drawing-change-values"><span><small>기준 내역서</small><b>{quantityText(selectedComparison.baseline_quantity)}</b></span><span><small>변경 내역서</small><b>{quantityText(selectedComparison.changed_quantity)}</b></span><span><small>수량 차이</small><b className={Number(selectedComparison.difference || 0) < 0 ? "decrease" : "increase"}>{selectedComparison.difference !== undefined && selectedComparison.difference !== null && selectedComparison.difference !== "" ? `${Number(selectedComparison.difference) > 0 ? "+" : ""}${quantityText(selectedComparison.difference)}` : "—"}</b></span></div><em>{selectedComparison.result} · {selectedItemRelated ? "도면 표기와 연관" : "공종 대표 물량"}</em><button type="button" className="button-secondary" onClick={() => router.push(withDataScope(`/quantities?sourceSet=기준·변경 대조&workPackage=${encodeURIComponent(displayWorkPackage(summaryCandidate.work_package))}`))}>기준·변경 수량 대조</button></div> : <p className="muted-line">현재 필터 범위에서 공종 대표 물량을 찾지 못했습니다. 공사단위 필터를 선택하거나 내역·수량 화면에서 원천값을 확인하세요.</p>}</section>}
+    {!loading && <section className="panel drawing-change-summary"><div className="panel-head"><div><p className="eyebrow">TRADE CHANGE SUMMARY</p><h2>{workPackage === "전체" ? "대표 변경 1건" : `${workPackage} 대표 변경`}</h2><small className="muted-line">공사단위를 선택하면 해당 공종의 대표 내역 1건만 표시합니다. 먼저 변경 구간과 기준·변경 물량을 확인하고, PDF는 해당 내용을 이해하기 위한 화면 자료로 활용합니다.</small></div><span className="review-only">검토 지원</span></div><div className="drawing-review-status"><span className="drawing-status-ok"><b>검토 정보</b> 대표 내역·변경 구간·기준/변경 수량</span><span className="drawing-status-pending"><b>참고</b> 도면 표기와 물량을 함께 보고 판단</span></div>{comparisonLoading ? <p className="muted-line">대표 물량 변화를 불러오는 중입니다…</p> : summaryCandidate && selectedComparison ? <div className="drawing-change-summary-single"><div><span className="drawing-change-card-trade">{summaryTrade}</span><strong>{selectedComparison.item_text}</strong><span className="drawing-change-location">{drawingReferenceLabel(summaryCandidate, summaryTrade)} · {summaryCandidate.change_type || "변경 후보"} · {candidateTextForTrade(summaryCandidate, summaryTrade)}</span></div><div className="drawing-change-values"><span><small>기준 내역서</small><b>{quantityText(selectedComparison.baseline_quantity)}</b></span><span><small>변경 내역서</small><b>{quantityText(selectedComparison.changed_quantity)}</b></span><span><small>수량 차이</small><b className={Number(selectedComparison.difference || 0) < 0 ? "decrease" : "increase"}>{selectedComparison.difference !== undefined && selectedComparison.difference !== null && selectedComparison.difference !== "" ? `${Number(selectedComparison.difference) > 0 ? "+" : ""}${quantityText(selectedComparison.difference)}` : "—"}</b></span></div><em>{selectedComparison.result} · {selectedItemRelated ? "도면 표기와 연관" : "공종 대표 물량"}</em><button type="button" className="button-secondary" onClick={() => router.push(withDataScope(`/quantities?sourceSet=기준·변경 대조&workPackage=${encodeURIComponent(summaryTrade)}`))}>기준·변경 수량 대조</button></div> : <p className="muted-line">현재 필터 범위에서 공종 대표 물량을 찾지 못했습니다. 공사단위 필터를 선택하거나 내역·수량 화면에서 원천값을 확인하세요.</p>}</section>}
     {notice && <PageMessage tone="warning">{notice}</PageMessage>}
     {loading ? <section className="panel cad-loading">도면 변경 후보를 불러오는 중입니다…</section> : !selected ? <section className="panel empty">현재 범위에 도면 변경 후보가 없습니다.</section> : <section className="cad-workspace">
       <div className="cad-main panel">
-         <div className="panel-head"><div><p className="eyebrow">PDF DRAWING REVIEW</p><h2>{displayDrawingNumber}</h2><small className="muted-line">{selected.discipline || "공종 미지정"} · {masonryPlan ? "조적 대표 내역은 별도 수량 근거 · 위치는 층별 평면도에서 확인" : (selected.location_ref || "위치 확인 필요")}</small><small className="muted-line">PDF 원본 우선 · {pdfPageStatus} · 텍스트·좌표는 변경 표기 탐색을 위한 보조 근거입니다.</small></div><CandidateBadge status={selected.status} confidence={selected.confidence} /></div>
+         <div className="panel-head"><div><p className="eyebrow">PDF DRAWING REVIEW</p><h2>{displayDrawingNumber}</h2><small className="muted-line">{selected.discipline || "공종 미지정"} · {masonryPlan ? "조적 대표 내역은 별도 수량 근거 · 위치는 층별 평면도에서 확인" : waterproofPlan ? "5층 신설 방수 위치 · 변경 도면에서 확인" : (selected.location_ref || "위치 확인 필요")}</small><small className="muted-line">PDF 원본 우선 · {pdfPageStatus} · 텍스트·좌표는 변경 표기 탐색을 위한 보조 근거입니다.</small></div><CandidateBadge status={selected.status} confidence={selected.confidence} /></div>
         <div className="cad-revision-labels"><span><b>기준 도면</b>{selected.baseline_revision || "Rev. 확인 필요"}</span><span><b>변경 도면</b>{selected.changed_revision || "Rev. 확인 필요"}</span></div>
          {masonryPlan && selected.baseline_floor_pages?.length === 2 && selected.changed_floor_pages?.length === 2 && <div className="masonry-floor-tabs" role="tablist" aria-label="조적공사 PDF 층별 근거"><span>조적 PDF 근거</span>{([1, 2] as const).map(floor => <button key={floor} type="button" role="tab" aria-selected={masonryFloor === floor} className={masonryFloor === floor ? "active" : ""} onClick={() => setMasonryFloor(floor)}>{floor}층 평면도</button>)}<small>기준·변경의 <b>동일 층 평면도</b>를 비교합니다. {masonryLocationMessage}</small></div>}
-         <div className="cad-viewports"><div className="cad-viewport"><div className="cad-viewport-header">기준 · {selected.baseline_revision || "UNKNOWN"}<span>{shortFileName(selected.baseline_file)}</span><small>{pdfPageRef(baselinePdfPage)}</small></div>{canComparePdfPages ? <SourcePdfPreview url={baselinePreviewUrl} pageNumber={baselinePdfPage} changed={false} exactPage={pdfExactPage} /> : <PdfLoadingPreview changed={false} />}</div><div className="cad-divider" aria-hidden="true" /><div className="cad-viewport changed"><div className="cad-viewport-header">변경 · {selected.changed_revision || "UNKNOWN"}<span>{shortFileName(selected.changed_file)}</span><small>{pdfPageRef(changedPdfPage)}</small></div>{canComparePdfPages ? <SourcePdfPreview url={changedPreviewUrl} pageNumber={changedPdfPage} changed exactPage={pdfExactPage} highlightRegions={pdfHighlightRegions} /> : <PdfLoadingPreview changed />}</div></div>
+         {waterproofPlan && waterproofEvidence && <div className="masonry-floor-tabs waterproof-floor-tabs" role="tablist" aria-label="방수공사 PDF 근거"><span>방수 PDF 근거</span><button type="button" role="tab" aria-selected="true" className="active" disabled>5층 신설</button><small>기준 도면에 5층 화장실은 없고, 변경 도면 PDF p.67의 1A-808 확대도에 주황 음영으로 표시합니다. <b>{waterproofLocationMessage}</b> 변경 도면의 1A-809(PDF p.68)는 보조 전개도입니다.</small></div>}
+         {steelFloorPlan && <div className="masonry-floor-tabs steel-floor-tabs" role="tablist" aria-label="구조공사 4층에서 5층 신설 PDF 근거"><span>구조 PDF 근거</span><button type="button" role="tab" aria-selected="true" className="active" disabled>4층→5층</button><small>1S-301 구조 입면도에서 4층 상부부터 5층 신설 구조부를 파란 음영으로 표시합니다. <b>1S-208 5층 구조평면도는 적용 GRID·부재 범위 보조자료입니다.</b></small></div>}
+         {rcRampSupportingCandidate && <div className="masonry-floor-tabs rc-support-tabs" role="region" aria-label="이전 철근콘크리트 상세 PDF 보조자료"><span>이전 RC 상세 PDF</span><button type="button" className={showSupportingPdf ? "active" : ""} onClick={() => setShowSupportingPdf(value => !value)}>{showSupportingPdf ? "보조자료 닫기" : "1S-701 경사로 p.50 열기"}</button><small>기존 검토 자료인 1S-701 잡배근 상세도의 경사로 레벨·형상 변경을 5층 구조 변경의 보조 근거로 함께 확인합니다.</small></div>}
+         {rcRampPlan && <div className="masonry-floor-tabs rc-floor-tabs" role="tablist" aria-label="철근콘크리트공사 경사로 PDF 근거"><span>철근콘크리트 PDF 근거</span><button type="button" role="tab" aria-selected="true" className="active" disabled>경사로 상세</button><small>1S-701 잡배근 상세도 p.50에서 기준·변경의 경사로 레벨과 형상 차이를 비교합니다. <b>수량·금액은 별도 산출서 확인이 필요합니다.</b></small></div>}
+         <div className="cad-viewports"><div className="cad-viewport"><div className="cad-viewport-header">기준 · {selected.baseline_revision || "UNKNOWN"}<span>{waterproofPlan ? "5층 기준 도면 없음" : shortFileName(selected.baseline_file)}</span><small>{pdfPageRef(baselinePdfPage, waterproofPlan ? "기준 도면 없음" : undefined)}</small></div>{waterproofPlan ? <MissingFloorPreview label="5층 화장실" /> : baselinePreviewUrl ? <SourcePdfPreview url={baselinePreviewUrl} pageNumber={baselinePdfPage} changed={false} exactPage={pdfExactPage} /> : <PdfLoadingPreview changed={false} />}</div><div className="cad-divider" aria-hidden="true" /><div className="cad-viewport changed"><div className="cad-viewport-header">변경 · {selected.changed_revision || "UNKNOWN"}<span>{shortFileName(selected.changed_file)}</span><small>{pdfPageRef(changedPdfPage)}</small></div>{changedPreviewUrl ? <SourcePdfPreview url={changedPreviewUrl} pageNumber={changedPdfPage} changed exactPage={pdfExactPage} highlightRegions={pdfHighlightRegions} highlightTone={waterproofPlan ? "waterproof-new" : "masonry"} highlightLegend={pdfHighlightLegend} /> : <PdfLoadingPreview changed />}</div></div>
+         {showSupportingPdf && rcRampSupportingCandidate && <div className="rc-supporting-pdf"><div className="rc-supporting-pdf-head"><b>이전 RC 상세 보조자료 · 1S-701</b><span>기준·변경 PDF p.50</span></div><div className="rc-supporting-pdf-grid"><div><small>기준 Rev.0</small><SourcePdfPreview url={rcRampSupportingBaselineUrl} pageNumber={rcRampSupportingPage} changed={false} exactPage /></div><div><small>변경 Rev.F · 경사로 변경 음영</small><SourcePdfPreview url={rcRampSupportingChangedUrl} pageNumber={rcRampSupportingChangedPage} changed exactPage highlightRegions={rcRampSupportingHighlights} highlightLegend="파란 음영 · 경사로 변경 구간" /></div></div></div>}
          <div className="cad-footer"><span>{canComparePdfPages ? (pdfExactPage ? `기준 ${pdfPageRef(baselinePdfPage)} · 변경 ${pdfPageRef(changedPdfPage)} 실제 PDF 페이지를 표시합니다.` : "기준·변경 PDF 원본을 표시합니다. 현재 후보에는 페이지 연결값이 없어 1페이지부터 열립니다.") : "등록된 기준·변경 PDF 원본을 불러오는 중입니다. PDF가 없을 때만 원본 자료 화면에서 확인합니다."}</span><div className="cad-footer-actions"><button type="button" className="button-secondary" onClick={() => router.push("/upload")}>원본 자료 화면 열기</button></div></div>
       </div>
-      <aside className="cad-inspector panel"><div className="panel-head"><div><p className="eyebrow">CHANGE CANDIDATE</p><h2>변경 후보 상세</h2></div><span className="review-only">검토 지원</span></div><div className="cad-alert"><strong>{candidateTextForTrade(selected, workPackage === "전체" ? displayWorkPackage(selected.work_package) : workPackage)}</strong><p>도면 표기와 내역 연결은 참고용이며, 이 화면에서는 변경 구간과 물량 변화를 먼저 확인합니다.</p></div><dl className="cad-facts">{masonryPlan ? <><div><dt>공사단위</dt><dd>조적공사</dd></div><div><dt>비교 도면</dt><dd>DWG-{masonryFloor === 1 ? "201" : "202"} · {masonryFloor}층 평면도</dd></div><div><dt>대표 내역 근거</dt><dd>DWG-111 마감재료표 · 시멘트 벽돌</dd></div><div><dt>위치 상태</dt><dd>{masonryFloor === 1 ? "1층 대표 변경 구간 표시" : "2층 대표 변경 구간 없음"}</dd></div><div><dt>PDF 비교</dt><dd>기준 {pdfPageRef(baselinePdfPage)} ↔ 변경 {pdfPageRef(changedPdfPage)}</dd></div><div><dt>기준 Rev.</dt><dd>{selected.baseline_revision || "UNKNOWN"}</dd></div><div><dt>변경 Rev.</dt><dd>{selected.changed_revision || "UNKNOWN"}</dd></div><div><dt>원본 행</dt><dd>{selected.source_row_ref || "확인 필요"}</dd></div></> : <><div><dt>공사단위</dt><dd>{displayWorkPackage(selected.work_package)}</dd></div><div><dt>도면번호</dt><dd>{selected.drawing_number || "-"}</dd></div><div><dt>시트</dt><dd>{selected.sheet_number || "-"}</dd></div><div><dt>위치 근거</dt><dd>{selected.location_ref || "확인 필요"}</dd></div><div><dt>기준 Rev.</dt><dd>{selected.baseline_revision || "UNKNOWN"}</dd></div><div><dt>변경 Rev.</dt><dd>{selected.changed_revision || "UNKNOWN"}</dd></div><div><dt>원본 행</dt><dd>{selected.source_row_ref || "확인 필요"}</dd></div><div><dt>변경 유형</dt><dd>{selected.change_type || "-"}</dd></div></>}</dl><section className="cad-links"><h3>도면·내역 보조 정보</h3>{masonryPlan ? <><div>대표 내역 ↔ 위치 도면 <b>분리 표시</b></div><small>사용자가 확인한 대표 변경 구간을 층별로 표시합니다. DWG-111의 재료표 텍스트만으로 위치를 만들지 않습니다.</small></> : <><div>도면 표기 ↔ 변경 내역 <b>{selected.link_status || "연결 근거 없음"}</b></div><div>연결 후보 원천행 <b>{selected.linked_estimate_count ?? 0}건</b></div>{selected.linked_estimate_names?.length ? <small title={selected.linked_estimate_names.join(" · ")}>참고 내역 {selected.linked_estimate_names.join(" · ")}</small> : <small>같은 사무동 원천행이 없으면 공종 대표 물량으로 표시합니다.</small>}</>}<div>수량산출서 → 내역서 <b>별도 수량 검토</b></div></section><div className="cad-actions"><button type="button" onClick={() => router.push(withDataScope(`/quantities?sourceSet=변경자료${selected.work_package ? `&workPackage=${encodeURIComponent(displayWorkPackage(selected.work_package))}` : ""}`))}>변경 내역·수량 검토</button><button type="button" onClick={() => router.push("/approvals")}>근거 확인·승인 화면</button><button type="button" className="button-secondary" onClick={() => router.push("/approvals")}>추가자료 요청 화면</button></div></aside>
     </section>}
     {!loading && filteredItems.length > 1 && <section className="panel cad-candidate-list"><div className="panel-head"><div><p className="eyebrow">SOURCE CANDIDATES</p><h2>원천 후보 {filteredItems.length}건</h2></div><span className="muted-line">대표 변경 1건을 우선 확인하고, 필요한 경우에만 세부 후보를 펼칩니다.</span></div><p className="muted-line cad-candidate-note">반복되는 CAD 텍스트 행은 자동 확정 대상이 아닙니다. 공사단위·텍스트 역할·위치 상태 필터로 범위를 좁힌 뒤 세부 근거를 확인하세요.</p><button type="button" className="button-secondary cad-candidate-toggle" onClick={() => setShowCandidateList(value => !value)}>{showCandidateList ? "세부 후보 숨기기" : `세부 후보 펼치기 (최대 ${renderedItems.length}건)`}</button>{showCandidateList && <div className="candidate-list compact-list">{renderedItems.map(item => <button type="button" className={`cad-candidate-row ${item.id === selected?.id ? "selected" : ""}`} key={item.id} onClick={() => setSelectedId(item.id)}><span className={`severity ${item.status.includes("복수") || item.status.includes("없음") ? "중간" : "낮음"}`}>{item.status || "검토 대기"}</span><strong>{displayWorkPackage(item.work_package)} · {item.drawing_number || item.sheet_number || item.id}</strong><span>{item.location_ref || `${item.baseline_revision || "-"} → ${item.changed_revision || "-"}`}</span><small>{item.text_role || "부위 미확정"} · {item.candidate_text || "변경 설명 확인 필요"}</small></button>)}</div>}</section>}
   </AppShell>;

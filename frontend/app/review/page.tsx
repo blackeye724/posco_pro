@@ -9,7 +9,7 @@ const statusOptions = ["전체 상태", "승인 대기", "추가 확인 필요",
 const dataScopeOptions = ["전체", "운영 자료", "통합 테스트"] as const;
 type DataScope = typeof dataScopeOptions[number];
 type ReviewStage = "all" | "initial" | "change" | "price";
-const stageLabels: Record<ReviewStage, string> = { all: "전체 확인 요청", initial: "01 최초자료", change: "02 설계변경", price: "03 신규내역 단가" };
+const stageLabels: Record<ReviewStage, string> = { all: "전체 검토 대상", initial: "01 최초자료", change: "02 설계변경", price: "03 신규내역 단가" };
 function originFor(...values: unknown[]): "운영 자료" | "통합 테스트" {
   return values.filter(Boolean).join(" ").match(/integration-source|demo_|통합 테스트/i) ? "통합 테스트" : "운영 자료";
 }
@@ -104,14 +104,14 @@ export default function ReviewQueuePage() {
 
   return <AppShell eyebrow="REVIEW TARGETS" title="검토 대상 목록">
     <div className="review-scope-bar"><span>프로젝트 <strong>광양5 사무동</strong></span><span>건물 <strong>전체</strong></span><span>공종 <strong>전체</strong></span><span>자료 회차 <code>API 기준</code></span><span className="scope-state">승인 전 후보값</span></div>
-    <p className="lead">{stage === "all" ? "세 단계의 확인 요청을 모아 보되, 각 항목의 검토 단계를 구분합니다." : `${stageLabels[stage]}에 해당하는 확인 요청만 표시합니다.`} 수량·금액·단가는 승인 전 확정값으로 표시하지 않습니다.</p>
+    <p className="lead">{stage === "all" ? "세 단계의 검토 대상을 모아 보되, 각 항목의 검토 단계를 구분합니다." : `${stageLabels[stage]}에 해당하는 검토 대상만 표시합니다.`} 수량·금액·단가는 승인 전 확정값으로 표시하지 않습니다.</p>
     <nav className="review-stage-tabs" aria-label="검토 단계">
       {(Object.keys(stageLabels) as ReviewStage[]).map(key => <button type="button" key={key} className={stage === key ? "active" : ""} onClick={() => handleStageChange(key)}>{stageLabels[key]} <small>{loading ? "—" : stageCounts[key].toLocaleString()}건</small></button>)}
     </nav>
-    <p className="review-stage-note">전체 확인 요청은 세 단계의 미처리 항목을 모은 보조함입니다. 단계를 선택하면 해당 업무의 항목·상태·근거만 표시됩니다.</p>
+    <p className="review-stage-note">전체 검토 대상은 세 단계의 미처리 항목을 모은 목록입니다. 단계를 선택하면 해당 업무의 항목·상태·근거만 표시됩니다.</p>
     {notice && <PageMessage tone="danger">{notice}</PageMessage>}
     <section className="review-kpis">
-      <div><span>{stage === "all" ? "전체 확인 요청" : `${stageLabels[stage]} 대상`}</span><strong>{loading ? "—" : stageWarnings.length.toLocaleString()}</strong><small>{stage === "all" ? "세 단계 합계" : "선택 단계 항목"}</small></div>
+      <div><span>{stage === "all" ? "전체 검토 대상" : `${stageLabels[stage]} 대상`}</span><strong>{loading ? "—" : stageWarnings.length.toLocaleString()}</strong><small>{stage === "all" ? "세 단계 합계" : "선택 단계 항목"}</small></div>
       <div><span>높음 경고</span><strong className="metric-danger">{loading ? "—" : highCount.toLocaleString()}</strong><small>근거 확인 필요</small></div>
       <div><span>원본 근거 연결</span><strong>{loading ? "—" : evidence.length.toLocaleString()}</strong><small>파일·행·셀·도면 위치</small></div>
       <div><span>승인 전 상태</span><strong className="metric-teal">후보</strong><small>자동 확정 금지</small></div>
