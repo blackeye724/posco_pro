@@ -1474,7 +1474,27 @@ def project_quantity_analysis(
     # than being represented only by the legacy drawing-candidate queue.
     result = reader.raw_quantity_analysis(db, project_id=project_id, limit=limit, source_set=source_set, issue_type=issue_type, severity=severity, query=q, discipline=discipline, work_package=work_package)
     if result is None:
-        result = reader.quantity_analysis(limit=limit, source_set=source_set, issue_type=issue_type, severity=severity, query=q, discipline=discipline, work_package=work_package)
+        try:
+            result = reader.quantity_analysis(limit=limit, source_set=source_set, issue_type=issue_type, severity=severity, query=q, discipline=discipline, work_package=work_package)
+        except FileNotFoundError:
+            # Hosted MVP deployments may not carry the large local
+            # preprocessing bundle. Keep the API usable with DB-seeded
+            # drawing/price samples and expose an empty quantity queue until
+            # the user uploads source workbooks.
+            result = {
+                "scope": source_set or "전체",
+                "generated_from": "원본 업로드 후 수량 분석 대기",
+                "total": 0,
+                "approval_queue_total": 0,
+                "summary": {},
+                "work_package_counts": {},
+                "items": [],
+                "recheck_summary": [],
+                "steel_relation_summary": [],
+                "steel_coating_formula_summary": [],
+                "material_construction_relation_summary": [],
+                "baseline_changed_comparison": [],
+            }
     result["project_id"] = project_id
     return result
 
