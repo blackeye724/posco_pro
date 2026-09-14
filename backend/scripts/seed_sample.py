@@ -40,8 +40,37 @@ from app.services.auth import hash_password
 
 
 def rows(root: Path, name: str) -> list[dict[str, str]]:
-    with (root / name).open("r", encoding="utf-8-sig", newline="") as source:
-        return list(csv.DictReader(source))
+    path = root / name
+    if path.exists():
+        with path.open("r", encoding="utf-8-sig", newline="") as source:
+            return list(csv.DictReader(source))
+
+    # Render와 같은 공개 환경에는 로컬 전처리 폴더가 포함되지 않을 수 있다.
+    # 이 경우에도 로그인·대시보드·검토 흐름을 바로 확인할 수 있도록
+    # 파일 의존성이 없는 최소 샘플 행을 사용한다.
+    fallbacks: dict[str, list[dict[str, str]]] = {
+        "72_사무동_검토우선순위_작업대기열.csv": [
+            {
+                "candidate_key": "ARCH-SAMPLE-001",
+                "discipline": "건축공사",
+                "candidate_text": "통합 테스트 검토 항목",
+                "drawing_sheet": "DWG-201",
+                "severity": "높음",
+                "recommended_first_action": "기준·변경 도면과 수량 근거를 확인하세요.",
+                "confidence": "0.95",
+                "source_candidate_count": "1",
+            }
+        ],
+        "79_사무동_구매부서_신규내역_단가검토_대기열.csv": [
+            {
+                "procurement_queue_id": "PRICE-NEW-SAMPLE-001",
+                "standard_key": "건축공사|통합 테스트 검토 항목",
+            }
+        ],
+    }
+    if name in fallbacks:
+        return fallbacks[name]
+    raise FileNotFoundError(f"전처리 샘플 파일이 없습니다: {path}")
 
 
 def get_or_create(db, model, key_field: str, key_value: str, **values):
